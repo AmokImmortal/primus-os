@@ -1,669 +1,420 @@
-# primus_core.py
+#!/usr/bin/env python3
 """
-PRIMUS Core Controller (primus_core.py) - Option C (Full OS controller)
+core/primus_core.py
 
-Responsibilities:
-- Initialize system components (RAG manager, agent manager, model manager, memory, session manager)
-- Provide ingest/search helpers that enforce scope & permissions
-- Route messages between agents (permissioned, logged, approval flow)
-- Provide system status and a comprehensive self-test routine
-- Provide logging for success/failure traces
-- Designed to be defensive (graceful fallbacks if components are missing)
+Central coordinator for PRIMUS OS subsystems.
 
-Place at:
-r"C:\P.R.I.M.U.S OS\System\core\primus_core.py"
+Responsibilities (v1 offline core):
+- Wire together:
+    - AgentManager
+    - ModelManager (local llama.cpp backend)
+    - MemoryManager (JSON-based)
+    - SessionManager
+    - SubchatLoader / SubchatSecurity / SubchatEngine
+    - Optional permissions / RAG (if present)
+- Provide a simple initialize() hook that:
+    - Brings subsystems online
+    - Returns a structured status dict
+- Provide helpers used by primus_runtime and primus_cli:
+    - list_subchats()
+    - create_subchat()
+    - get_subchat_info()
+    - model_status_check()
+    - run_self_test()
+- Expose get_primus_core(singleton=True) for a shared instance.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-import os
-import threading
-import time
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-# ====== Configuration defaults ======
-SYSTEM_ROOT = Path(__file__).resolve().parents[2]  # .../System/core -> parents[2] => .../System
-LOG_DIR = SYSTEM_ROOT / "core" / "system_logs"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
-LOG_FILE = LOG_DIR / "primus_core.log"
-
-# Concurrency: how many agent-to-agent collaborations can run concurrently
-DEFAULT_MAX_PARALLEL_AGENT_INTERACTIONS = 2
-
-# Approval token prefix
-_APPROVAL_PREFIX = "PRIMUS-APPROVAL-"
-
-# ====== Setup logging ======
 logger = logging.getLogger("primus_core")
-logger.setLevel(logging.DEBUG)
-fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
-formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
-fh.setFormatter(formatter)
-if not logger.handlers:
-    logger.addHandler(fh)
-# Also log to console for convenience (when running terminal tests)
-ch = logging.StreamHandler()
-ch.setFormatter(formatter)
-logger.addHandler(ch)
 
+# ---------------------------------------------------------------------------
+# Safe imports for subsystems
+# ---------------------------------------------------------------------------
 
-# ====== Defensive imports for pluggable components ======
+# Agent manager
 try:
-    from rag.rag_manager import RAGManager  # user-created rag_manager.py
-except Exception:
-    RAGManager = None
+    from .agent_manager import AgentManager
+except Exception:  # noqa: BLE001
+    AgentManager = None  # type: ignore[assignment]
+    logger.warning("AgentManager not available; agent functionality will be limited.")
+
+# Model manager (llama.cpp backend wrapper)
+try:
+    from .model_manager import ModelManager
+except Exception:  # noqa: BLE001
+    ModelManager = None  # type: ignore[assignment]
+    logger.warning("ModelManager not available; model backend will be unavailable.")
+
+# Memory manager (JSON-based)
+try:
+    from .memory_manager import MemoryManager
+except Exception:  # noqa: BLE001
+    MemoryManager = None  # type: ignore[assignment]
+    logger.warning("MemoryManager not available; memory subsystem disabled.")
+
+# Session manager
+try:
+    from .session_manager import SessionManager
+except Exception:  # noqa: BLE001
+    SessionManager = None  # type: ignore[assignment]
+    logger.warning("SessionManager not available; session tracking disabled.")
+
+# Subchat components
+try:
+    from .subchat_loader import SubchatLoader
+except Exception:  # noqa: BLE001
+    SubchatLoader = None  # type: ignore[assignment]
+    logger.warning("SubchatLoader not available; subchat registry disabled.")
+
+try:
+    from .subchat_security import SubchatSecurity
+except Exception:  # noqa: BLE001
+    SubchatSecurity = None  # type: ignore[assignment]
+    logger.warning("SubchatSecurity not available; subchat security disabled.")
+
+try:
+    from .subchat_engine import SubchatEngine
+except Exception:  # noqa: BLE001
+    SubchatEngine = None  # type: ignore[assignment]
+    logger.warning("SubchatEngine not available; subchat execution disabled.")
+
+# Permissions (optional)
+try:
+    from . import permissions as permissions_module
+except Exception:  # noqa: BLE001
+    permissions_module = None
+    logger.warning("permissions module not available; permission checks disabled.")
+
+# Optional RAG manager (may not be present yet)
+try:
+    from .rag_manager import RAGManager  # type: ignore[import]
+except Exception:  # noqa: BLE001
+    RAGManager = None  # type: ignore[assignment]
     logger.warning("RAGManager not available; RAG functionality will be limited.")
 
-try:
-    from core.agent_manager import AgentManager
-except Exception:
-    AgentManager = None
-    logger.warning("AgentManager not available; agent registration will be limited.")
 
-try:
-    from core.model_manager import ModelManager
-except Exception:
-    ModelManager = None
-    logger.warning("ModelManager not available; model management will be limited.")
-
-try:
-    from core.subchat_loader import SubchatLoader
-    from core.subchat_security import SubchatSecurity
-    from core.subchat_state import SubchatStateManager
-    from core.subchat_engine import SubchatEngine
-except Exception:
-    SubchatLoader = None
-    SubchatSecurity = None
-    SubchatStateManager = None
-    SubchatEngine = None
-    logger.warning("Subchat components not available; subchat support disabled.")
-
-try:
-    from core.memory import MemoryManager
-except Exception:
-    MemoryManager = None
-    logger.warning("MemoryManager not available; memory features will be limited.")
-
-try:
-    from core.session_manager import SessionManager
-except Exception:
-    SessionManager = None
-    logger.warning("SessionManager not available; sessions will be limited.")
+# ---------------------------------------------------------------------------
+# PrimusCore
+# ---------------------------------------------------------------------------
 
 
-# ====== Core controller class ======
 class PrimusCore:
-    def __init__(self, max_parallel_interactions: int = DEFAULT_MAX_PARALLEL_AGENT_INTERACTIONS):
-        self.system_root = SYSTEM_ROOT
-        self.max_parallel_interactions = max_parallel_interactions
+    """
+    Central PRIMUS OS core coordinator.
 
-        # Components (filled in initialize)
-        self.rag: Optional[Any] = None
+    This class wires subsystems together and exposes a small set of helpers
+    used by the runtime/CLI. It is intentionally conservative and offline-first.
+    """
+
+    def __init__(self, system_root: Optional[Path] = None):
+        self.system_root: Path = system_root or Path(__file__).resolve().parents[1]
+
+        # Subsystem handles (may remain None if import/initialization fails)
         self.agent_manager: Optional[Any] = None
         self.model_manager: Optional[Any] = None
-        self.memory: Optional[Any] = None
+        self.memory_manager: Optional[Any] = None
         self.session_manager: Optional[Any] = None
-
-        # Subchat
-        self.subchat_security: Optional[Any] = None
         self.subchat_loader: Optional[Any] = None
-        self.subchat_state_manager: Optional[Any] = None
+        self.subchat_security: Optional[Any] = None
         self.subchat_engine: Optional[Any] = None
+        self.permissions: Optional[Any] = None
+        self.rag_manager: Optional[Any] = None
 
-        # Agent interaction control
-        self._interaction_lock = threading.BoundedSemaphore(self.max_parallel_interactions)
-        self._pending_approvals: Dict[str, Dict[str, Any]] = {}
-        self._lock = threading.RLock()
+        logger.info("PrimusCore created (system_root=%s)", self.system_root)
 
-        # Basic registry of agent permissions (agent_name -> dict)
-        # Permissions fields: {"can_read_global_rag": bool, "can_write_own_rag": bool, "can_contact_agents": bool}
-        self.agent_permissions: Dict[str, Dict[str, Any]] = {}
+    # ------------------------------------------------------------------
+    # Initialization
+    # ------------------------------------------------------------------
 
-        logger.info("PrimusCore instance created.")
-
-    # -------------------------
-    # Initialization / Shutdown
-    # -------------------------
     def initialize(self) -> Dict[str, Any]:
         """
-        Initialize all available subsystems. Returns a dict describing statuses.
-        """
-        logger.info("Initializing PrimusCore subsystems...")
-        statuses = {}
+        Initialize subsystems and return a structured status dict.
 
-        # RAG manager
-        try:
-            if RAGManager:
-                self.rag = RAGManager(system_root=str(self.system_root))
-                statuses["rag"] = {"status": "ok"}
-                logger.info("RAGManager initialized.")
-            else:
-                statuses["rag"] = {"status": "missing"}
-        except Exception as e:
-            statuses["rag"] = {"status": "error", "error": str(e)}
-            logger.exception("Failed to initialize RAGManager.")
+        This should be safe to call multiple times; repeated calls
+        re-use existing managers when possible.
+        """
+        status: Dict[str, Any] = {
+            "rag": {"status": "missing"},
+            "agent_manager": {"status": "missing"},
+            "model_manager": {"status": "missing"},
+            "memory": {"status": "missing"},
+            "session_manager": {"status": "missing"},
+            "subchats": {"status": "missing", "count": 0},
+            "permissions": {"status": "missing"},
+        }
+
+        # RAG (optional)
+        if RAGManager is not None:
+            try:
+                if self.rag_manager is None:
+                    self.rag_manager = RAGManager(self.system_root)
+                status["rag"] = {"status": "ok"}
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Failed to initialize RAGManager: %s", exc)
+                status["rag"] = {"status": "error", "error": str(exc)}
+        else:
+            status["rag"] = {"status": "missing"}
 
         # Agent manager
-        try:
-            if AgentManager:
-                try:
-                    self.agent_manager = AgentManager(system_root=str(self.system_root))
-                except TypeError:
-                    # Fallback for constructors that do not accept system_root
-                    self.agent_manager = AgentManager()
-                statuses["agent_manager"] = {"status": "ok"}
-                logger.info("AgentManager initialized.")
-            else:
-                statuses["agent_manager"] = {"status": "missing"}
-        except Exception as e:
-            statuses["agent_manager"] = {"status": "error", "error": str(e)}
-            logger.exception("Failed to initialize AgentManager.")
+        if AgentManager is not None:
+            try:
+                if self.agent_manager is None:
+                    agents_dir = self.system_root / "agents"
+                    self.agent_manager = AgentManager(agents_dir)
+                agents = getattr(self.agent_manager, "list_agents", lambda: [])()
+                status["agent_manager"] = {"status": "ok", "agents": agents}
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Failed to initialize AgentManager: %s", exc)
+                status["agent_manager"] = {"status": "error", "error": str(exc)}
+        else:
+            status["agent_manager"] = {"status": "missing"}
 
         # Model manager
-        try:
-            if ModelManager:
-                self.model_manager = ModelManager(system_root=str(self.system_root))
-                statuses["model_manager"] = {"status": "ok"}
-                logger.info("ModelManager initialized.")
-            else:
-                statuses["model_manager"] = {"status": "missing"}
-        except Exception as e:
-            statuses["model_manager"] = {"status": "error", "error": str(e)}
-            logger.exception("Failed to initialize ModelManager.")
+        if ModelManager is not None:
+            try:
+                if self.model_manager is None:
+                    self.model_manager = ModelManager()
+                ok, msg = self.model_status_check()
+                status["model_manager"] = {
+                    "status": "ok" if ok else "degraded",
+                    "models": getattr(self.model_manager, "list_models", lambda: [])(),
+                }
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Failed to initialize ModelManager: %s", exc)
+                status["model_manager"] = {"status": "error", "error": str(exc)}
+        else:
+            status["model_manager"] = {"status": "missing"}
 
         # Memory manager
-        try:
-            if MemoryManager:
-                try:
-                    self.memory = MemoryManager(system_root=str(self.system_root))
-                except TypeError:
-                    self.memory = MemoryManager()
-                statuses["memory"] = {"status": "ok"}
-                logger.info("MemoryManager initialized.")
-            else:
-                statuses["memory"] = {"status": "missing"}
-        except Exception as e:
-            statuses["memory"] = {"status": "error", "error": str(e)}
-            logger.exception("Failed to initialize MemoryManager.")
+        if MemoryManager is not None:
+            try:
+                if self.memory_manager is None:
+                    self.memory_manager = MemoryManager()
+                status["memory"] = {"status": "ok"}
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Failed to initialize MemoryManager: %s", exc)
+                status["memory"] = {"status": "error", "error": str(exc)}
+        else:
+            status["memory"] = {"status": "missing"}
 
         # Session manager
-        try:
-            if SessionManager:
-                try:
-                    self.session_manager = SessionManager(system_root=str(self.system_root))
-                except TypeError:
-                    self.session_manager = SessionManager()
-                statuses["session_manager"] = {"status": "ok"}
-                logger.info("SessionManager initialized.")
-            else:
-                statuses["session_manager"] = {"status": "missing"}
-        except Exception as e:
-            statuses["session_manager"] = {"status": "error", "error": str(e)}
-            logger.exception("Failed to initialize SessionManager.")
-
-        # Subchat subsystem
-        try:
-            if SubchatLoader and SubchatSecurity and SubchatStateManager:
-                self.subchat_security = SubchatSecurity()
-                self.subchat_state_manager = SubchatStateManager()
-                self.subchat_loader = SubchatLoader(
-                    security=self.subchat_security,
-                    state_manager=self.subchat_state_manager,
-                )
-                if SubchatEngine:
-                    self.subchat_engine = SubchatEngine()
-                count = len(self.subchat_loader.list_ids()) if self.subchat_loader else 0
-                statuses["subchats"] = {"status": "ok", "count": count}
-                logger.info("Subchat subsystem initialized (%s subchats discovered).", count)
-            else:
-                statuses["subchats"] = {"status": "missing"}
-        except Exception as e:
-            statuses["subchats"] = {"status": "error", "error": str(e)}
-            logger.exception("Failed to initialize subchat subsystem.")
-
-        # Load agent permissions if available (persisted file)
-        permissions_file = self.system_root / "configs" / "agent_permissions.json"
-        if permissions_file.exists():
+        if SessionManager is not None:
             try:
-                with open(permissions_file, "r", encoding="utf-8") as f:
-                    self.agent_permissions = json.load(f)
-                statuses["permissions"] = {"status": "loaded"}
-                logger.info("Agent permissions loaded from disk.")
-            except Exception as e:
-                statuses["permissions"] = {"status": "error", "error": str(e)}
-                logger.exception("Failed to load agent permissions file.")
+                if self.session_manager is None:
+                    self.session_manager = SessionManager()
+                status["session_manager"] = {"status": "ok"}
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Failed to initialize SessionManager: %s", exc)
+                status["session_manager"] = {"status": "error", "error": str(exc)}
         else:
-            # initialize empty and persist later when registering agents
-            self.agent_permissions = {}
-            statuses["permissions"] = {"status": "none"}
+            status["session_manager"] = {"status": "missing"}
+
+        # Subchats
+        subchat_count = 0
+        if SubchatLoader is not None and SubchatSecurity is not None and SubchatEngine is not None:
+            try:
+                if self.subchat_security is None:
+                    self.subchat_security = SubchatSecurity(self.system_root)
+                if self.subchat_loader is None:
+                    self.subchat_loader = SubchatLoader(self.system_root, self.subchat_security)
+                if self.subchat_engine is None:
+                    self.subchat_engine = SubchatEngine(max_workers=1)
+
+                list_fn = getattr(self.subchat_loader, "list_subchats", None)
+                if callable(list_fn):
+                    subchats = list_fn()
+                    subchat_count = len(subchats)
+                status["subchats"] = {"status": "ok", "count": subchat_count}
+                logger.info("Subchat subsystem initialized (%d subchats discovered).", subchat_count)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Failed to initialize subchat subsystem: %s", exc)
+                status["subchats"] = {"status": "error", "error": str(exc), "count": subchat_count}
+        else:
+            status["subchats"] = {"status": "missing", "count": 0}
+
+        # Permissions (optional)
+        if permissions_module is not None:
+            try:
+                if hasattr(permissions_module, "PermissionsManager"):
+                    if self.permissions is None:
+                        self.permissions = permissions_module.PermissionsManager()  # type: ignore[attr-defined]
+                    status["permissions"] = {"status": "ok"}
+                else:
+                    status["permissions"] = {"status": "none"}
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Failed to initialize permissions: %s", exc)
+                status["permissions"] = {"status": "error", "error": str(exc)}
+        else:
+            status["permissions"] = {"status": "none"}
 
         logger.info("PrimusCore initialization complete.")
-        return statuses
-
-    def shutdown(self):
-        """Graceful shutdown hooks for components (best-effort)."""
-        logger.info("Shutting down PrimusCore subsystems...")
-        # If components provide a close/stop method, call them
-        for comp_name in ("rag", "agent_manager", "model_manager", "memory", "session_manager"):
-            comp = getattr(self, comp_name)
-            try:
-                if comp and hasattr(comp, "close"):
-                    comp.close()
-                    logger.info(f"Closed component: {comp_name}")
-            except Exception:
-                logger.exception(f"Error closing {comp_name}")
-        logger.info("Shutdown complete.")
-
-    # -------------------------
-    # Permission & registration helpers
-    # -------------------------
-    def register_agent(self, agent_name: str, permissions: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """
-        Register agent with basic permission set. This does NOT auto-create agent code,
-        it simply records permissions and persists them.
-        """
-        with self._lock:
-            if permissions is None:
-                permissions = {
-                    "can_read_global_rag": False,
-                    "can_write_own_rag": True,
-                    "can_contact_agents": False,
-                    "can_read_other_agents_rag": False,
-                }
-            self.agent_permissions[agent_name] = permissions
-            self._persist_permissions()
-            logger.info(f"Registered agent '{agent_name}' with permissions: {permissions}")
-            return {"status": "ok", "agent": agent_name, "permissions": permissions}
-
-    def update_agent_permissions(self, agent_name: str, permissions: Dict[str, Any]) -> Dict[str, Any]:
-        with self._lock:
-            if agent_name not in self.agent_permissions:
-                return {"status": "error", "error": "agent_not_registered"}
-            self.agent_permissions[agent_name].update(permissions)
-            self._persist_permissions()
-            logger.info(f"Updated permissions for '{agent_name}': {permissions}")
-            return {"status": "ok", "agent": agent_name, "permissions": self.agent_permissions[agent_name]}
-
-    def _persist_permissions(self):
-        try:
-            permissions_file = self.system_root / "configs" / "agent_permissions.json"
-            permissions_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(permissions_file, "w", encoding="utf-8") as f:
-                json.dump(self.agent_permissions, f, indent=2)
-            logger.debug("Persisted agent permissions to disk.")
-        except Exception:
-            logger.exception("Failed to persist agent permissions.")
-
-    # -------------------------
-    # RAG operations (ingest/search)
-    # -------------------------
-    def ingest(self, path: str, scope: str = "system", agent_name: Optional[str] = None,
-               chunk_size: int = 500, overlap: int = 50, model: Optional[str] = None) -> Dict[str, Any]:
-        """
-        Ingest documents into a given scope:
-            - scope = "system" -> system/global rag
-            - scope = "agent"  -> agent's private rag (agent_name required)
-        Enforces permissions and logs results.
-        """
-        logger.info(f"Ingest requested: path={path}, scope={scope}, agent={agent_name}")
-        try:
-            # Validate permission
-            if scope == "agent":
-                if not agent_name:
-                    return {"status": "error", "error": "agent_name_required_for_agent_scope"}
-                perms = self.agent_permissions.get(agent_name, {})
-                if not perms.get("can_write_own_rag", False):
-                    return {"status": "error", "error": "permission_denied"}
-
-            if self.rag:
-                if scope == "system":
-                    res = self.rag.ingest_folder(path=path, scope="system",
-                                                 chunk_size=chunk_size, overlap=overlap, model=model)
-                else:
-                    res = self.rag.ingest_folder(path=path, scope=f"agent:{agent_name}",
-                                                 chunk_size=chunk_size, overlap=overlap, model=model)
-                logger.info("Ingest result: %s", res)
-                return {"status": "ok", "result": res}
-            else:
-                logger.error("RAG manager not available.")
-                return {"status": "error", "error": "rag_manager_unavailable"}
-        except Exception as e:
-            logger.exception("Ingest failed.")
-            return {"status": "error", "error": str(e)}
-
-    def search_rag(self, query: str, scope: str = "system", agent_name: Optional[str] = None,
-                   topk: int = 5) -> Dict[str, Any]:
-        """
-        Search RAG with permission enforcement.
-        scope values:
-          - "system" -> system/global
-          - "agent" -> agent's private store (agent_name required)
-          - "all" -> merge system + agent as allowed (agent_name optional)
-        Returns topk hits with metadata.
-        """
-        logger.info(f"Search requested: query='{query}' scope={scope} agent={agent_name} topk={topk}")
-        try:
-            if not self.rag:
-                return {"status": "error", "error": "rag_manager_unavailable"}
-
-            # Permission checks
-            if scope == "agent":
-                if not agent_name:
-                    return {"status": "error", "error": "agent_name_required_for_agent_scope"}
-                perms = self.agent_permissions.get(agent_name, {})
-                if not perms.get("can_read_global_rag", True) and agent_name is None:
-                    return {"status": "error", "error": "permission_denied"}
-
-            # Delegation to rag manager
-            if scope == "system":
-                hits = self.rag.search(query=query, scope="system", topk=topk)
-            elif scope == "agent":
-                hits = self.rag.search(query=query, scope=f"agent:{agent_name}", topk=topk)
-            elif scope == "all":
-                # gather system + agent (where allowed)
-                sys_hits = self.rag.search(query=query, scope="system", topk=topk)
-                agg_hits = sys_hits
-                if agent_name:
-                    agg_hits += self.rag.search(query=query, scope=f"agent:{agent_name}", topk=topk)
-                # simple dedupe by metadata text (could be improved)
-                seen_texts = set()
-                dedup = []
-                for h in agg_hits:
-                    txt = json.dumps(h.get("metadata", {}).get("text", "")) if h.get("metadata") else ""
-                    if txt not in seen_texts:
-                        dedup.append(h)
-                        seen_texts.add(txt)
-                hits = dedup[:topk]
-            else:
-                return {"status": "error", "error": "unknown_scope"}
-
-            logger.info("Search returned %d hits", len(hits))
-            return {"status": "ok", "hits": hits}
-        except Exception as e:
-            logger.exception("Search failed.")
-            return {"status": "error", "error": str(e)}
-
-    # -------------------------
-    # Agent -> Agent routing (permissioned + approval)
-    # -------------------------
-    def route_message(self, src_agent: str, dst_agent: str, payload: Dict[str, Any],
-                      require_approval: bool = True, timeout: int = 60) -> Dict[str, Any]:
-        """
-        Route a message from src_agent to dst_agent subject to permissions and approvals.
-        If require_approval is True, an approval token is returned which must be confirmed by the human (external)
-        to actually deliver the message. This protects against autonomous agent-to-agent leakage.
-
-        Returns:
-            - immediate delivered result (if approval not required)
-            - pending token (if approval required)
-        """
-        logger.info("Routing message from %s -> %s (require_approval=%s)", src_agent, dst_agent, require_approval)
-
-        # Basic permission check
-        src_perms = self.agent_permissions.get(src_agent, {})
-        dst_perms = self.agent_permissions.get(dst_agent, {})
-        if not src_perms or not dst_perms:
-            logger.warning("One or both agents not registered.")
-            return {"status": "error", "error": "agent_not_registered"}
-
-        if not src_perms.get("can_contact_agents", False):
-            logger.warning("Source agent not allowed to contact other agents.")
-            return {"status": "error", "error": "src_not_allowed_to_contact_agents"}
-
-        if not dst_perms.get("can_contact_agents", True):
-            logger.warning("Destination agent not allowed to receive agent messages.")
-            return {"status": "error", "error": "dst_not_allowed_to_receive_messages"}
-
-        # Approval flow
-        if require_approval:
-            token = f"{_APPROVAL_PREFIX}{int(time.time()*1000)}-{src_agent}-{dst_agent}"
-            with self._lock:
-                self._pending_approvals[token] = {
-                    "src": src_agent,
-                    "dst": dst_agent,
-                    "payload": payload,
-                    "status": "pending",
-                    "created": time.time(),
-                }
-            logger.info("Message pending approval: token=%s", token)
-            # Caller (human/UI) should call confirm_approval(token, approve=True/False)
-            return {"status": "pending_approval", "token": token}
-        else:
-            # deliver immediately (best-effort) by invoking dispatcher/agent bridge if present
-            try:
-                if self.agent_manager and hasattr(self.agent_manager, "call_agent_method"):
-                    # common pattern: agent_manager.call_agent_method(dst_agent, method, payload)
-                    result = self.agent_manager.call_agent_method(dst_agent, "handle_message", payload)
-                    logger.info("Delivered message immediately; result=%s", result)
-                    return {"status": "delivered", "result": result}
-                else:
-                    logger.warning("Agent manager cannot deliver messages (missing method).")
-                    return {"status": "error", "error": "delivery_mechanism_unavailable"}
-            except Exception as e:
-                logger.exception("Error delivering message immediately.")
-                return {"status": "error", "error": str(e)}
-
-    def confirm_approval(self, token: str, approve: bool) -> Dict[str, Any]:
-        """
-        Human/UI confirms or rejects a pending agent->agent message.
-        If approved, the message is delivered (synchronously) and the delivery result returned.
-        """
-        with self._lock:
-            pending = self._pending_approvals.get(token)
-            if not pending:
-                logger.warning("Approval token not found: %s", token)
-                return {"status": "error", "error": "token_not_found"}
-
-            pending["status"] = "approved" if approve else "rejected"
-            pending["confirmed_at"] = time.time()
-
-        if not approve:
-            logger.info("Approval token rejected: %s", token)
-            return {"status": "rejected", "token": token}
-
-        # Proceed to deliver
-        src = pending["src"]
-        dst = pending["dst"]
-        payload = pending["payload"]
-
-        try:
-            if self.agent_manager and hasattr(self.agent_manager, "call_agent_method"):
-                result = self.agent_manager.call_agent_method(dst, "handle_message", payload)
-                logger.info("Delivered approved message; token=%s result=%s", token, result)
-                with self._lock:
-                    pending["delivered"] = True
-                    pending["result"] = result
-                return {"status": "delivered", "result": result}
-            else:
-                logger.warning("Agent manager cannot deliver approved messages.")
-                return {"status": "error", "error": "delivery_mechanism_unavailable"}
-        except Exception as e:
-            logger.exception("Approved delivery failed.")
-            return {"status": "error", "error": str(e)}
-
-    # -------------------------
-    # Self-test routine
-    # -------------------------
-    def run_self_test(self) -> Dict[str, Any]:
-        """
-        Run a quick self-test across key components:
-         - rag ingest + search smoke test (if RAG manager present)
-         - agent manager reachable
-         - model manager reachable
-         - memory manager reachable
-        Returns a dict with statuses and short logs.
-        """
-        logger.info("Running Primus self-test...")
-        summary = {"timestamp": time.time(), "results": {}}
-
-        # RAG smoke test
-        try:
-            if self.rag:
-                # prefer to run a lightweight check (list scopes + basic search)
-                scopes = self.rag.list_scopes() if hasattr(self.rag, "list_scopes") else None
-                summary["results"]["rag"] = {"status": "ok", "scopes": scopes}
-            else:
-                summary["results"]["rag"] = {"status": "missing"}
-        except Exception as e:
-            logger.exception("RAG self-test failed.")
-            summary["results"]["rag"] = {"status": "error", "error": str(e)}
-
-        # Agent manager
-        try:
-            if self.agent_manager:
-                agents = self.agent_manager.list_agents() if hasattr(self.agent_manager, "list_agents") else None
-                summary["results"]["agent_manager"] = {"status": "ok", "agents": agents}
-            else:
-                summary["results"]["agent_manager"] = {"status": "missing"}
-        except Exception as e:
-            logger.exception("AgentManager self-test failed.")
-            summary["results"]["agent_manager"] = {"status": "error", "error": str(e)}
-
-        # Model manager
-        try:
-            if self.model_manager:
-                models = self.model_manager.list_models() if hasattr(self.model_manager, "list_models") else None
-                summary["results"]["model_manager"] = {"status": "ok", "models": models}
-            else:
-                summary["results"]["model_manager"] = {"status": "missing"}
-        except Exception as e:
-            logger.exception("ModelManager self-test failed.")
-            summary["results"]["model_manager"] = {"status": "error", "error": str(e)}
-
-        # Memory manager
-        try:
-            if self.memory:
-                summary["results"]["memory"] = {"status": "ok"}
-            else:
-                summary["results"]["memory"] = {"status": "missing"}
-        except Exception as e:
-            logger.exception("Memory self-test failed.")
-            summary["results"]["memory"] = {"status": "error", "error": str(e)}
-
-        logger.info("Self-test complete.")
-        return summary
-
-    # -------------------------
-    # Subchat helpers (integration surface for runtime/CLI)
-    # -------------------------
-    def list_subchats(self) -> List[str]:
-        if not self.subchat_loader:
-            return []
-        return self.subchat_loader.list_ids()
-
-    def create_subchat(
-        self,
-        owner: str,
-        label: str,
-        is_private: bool = False,
-        allowed_agents: Optional[List[str]] = None,
-    ) -> str:
-        if not self.subchat_loader:
-            raise RuntimeError("Subchat loader unavailable")
-        return self.subchat_loader.create_subchat(
-            owner=owner,
-            label=label,
-            is_private=is_private,
-            allowed_agents=allowed_agents or [],
-        )
-
-    def get_subchat_info(self, subchat_id: str) -> Optional[Dict[str, Any]]:
-        if not self.subchat_security:
-            return None
-        return self.subchat_security.get_subchat_info(subchat_id)
-
-    def model_status_check(self) -> Tuple[bool, str]:
-        if not self.model_manager:
-            return False, "ModelManager unavailable"
-        try:
-            return self.model_manager.model_status_check()
-        except Exception as exc:
-            logger.exception("ModelManager status check failed: %s", exc)
-            return False, str(exc)
-
-    # -------------------------
-    # Status / Utilities
-    # -------------------------
-    def get_status(self) -> Dict[str, Any]:
-        """Return summarized status about the system and components."""
-        status = {
-            "system_root": str(self.system_root),
-            "rag": "present" if self.rag else "missing",
-            "agent_manager": "present" if self.agent_manager else "missing",
-            "model_manager": "present" if self.model_manager else "missing",
-            "memory": "present" if self.memory else "missing",
-            "session_manager": "present" if self.session_manager else "missing",
-            "agent_permissions_count": len(self.agent_permissions),
-            "max_parallel_interactions": self.max_parallel_interactions,
-        }
-        logger.debug("Status requested: %s", status)
         return status
 
-    # -------------------------
-    # Simple helper: allow an agent to request a RAG search across allowed scopes
-    # -------------------------
-    def agent_search(self, agent_name: str, query: str, topk: int = 5) -> Dict[str, Any]:
-        """
-        Agent-facing helper: search system RAG + agent's own RAG if permitted by policies.
-        """
-        logger.info("Agent '%s' requested search: %s", agent_name, query)
-        perms = self.agent_permissions.get(agent_name, {})
-        allowed_scopes = []
-        if perms.get("can_read_global_rag", False):
-            allowed_scopes.append("system")
-        if perms.get("can_read_own_rag", True):
-            allowed_scopes.append(f"agent:{agent_name}")
+    # ------------------------------------------------------------------
+    # Subchat helpers (used by runtime/CLI)
+    # ------------------------------------------------------------------
 
-        aggregate = []
-        for scope in allowed_scopes:
+    def list_subchats(self) -> List[Any]:
+        """Return a list of subchat metadata, or an empty list if unavailable."""
+        if self.subchat_loader is None:
+            return []
+        list_fn = getattr(self.subchat_loader, "list_subchats", None)
+        if not callable(list_fn):
+            return []
+        return list_fn()
+
+    def create_subchat(self, owner: str, label: str, is_private: bool = False) -> str:
+        """
+        Create a new subchat and return its ID.
+
+        Delegates to SubchatLoader / controller.
+        """
+        if self.subchat_loader is None:
+            raise RuntimeError("Subchat subsystem not initialized.")
+        create_fn = getattr(self.subchat_loader, "create_subchat", None)
+        if not callable(create_fn):
+            raise RuntimeError("SubchatLoader.create_subchat is not available.")
+        return create_fn(owner=owner, label=label, is_private=is_private)
+
+    def get_subchat_info(self, subchat_id: str) -> Dict[str, Any]:
+        """Return metadata for a given subchat, or {} if unavailable."""
+        if self.subchat_loader is None:
+            return {}
+        info_fn = getattr(self.subchat_loader, "get_subchat_info", None)
+        if not callable(info_fn):
+            return {}
+        return info_fn(subchat_id)
+
+    # ------------------------------------------------------------------
+    # Model backend helpers
+    # ------------------------------------------------------------------
+
+    def model_status_check(self) -> Tuple[bool, str]:
+        """
+        Return (ok, message) describing the model backend status.
+
+        Used by primus_runtime bootup tests.
+        """
+        if self.model_manager is None:
+            return False, "ModelManager not initialized"
+
+        # Prefer a dedicated status API if present
+        status_fn = getattr(self.model_manager, "backend_status", None)
+        if callable(status_fn):
             try:
-                if self.rag:
-                    hits = self.rag.search(query=query, scope=scope, topk=topk)
-                    aggregate.extend(hits)
-            except Exception:
-                logger.exception("Agent search failed for scope: %s", scope)
+                ok, msg = status_fn()
+                return bool(ok), str(msg)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("ModelManager.backend_status failed: %s", exc)
+                return False, f"backend_status error: {exc}"
 
-        return {"status": "ok", "hits": aggregate[:topk]}
+        # Fallback to has_backend() if available
+        has_fn = getattr(self.model_manager, "has_backend", None)
+        if callable(has_fn):
+            try:
+                ok = bool(has_fn())
+                return ok, "Model backend available" if ok else "Model backend missing"
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("ModelManager.has_backend failed: %s", exc)
+                return False, f"has_backend error: {exc}"
 
-# -------------------------
-# Module-level singleton for convenience
-# -------------------------
-_primus_singleton: Optional[PrimusCore] = None
+        # Final fallback
+        return True, "ModelManager present (no detailed status API)"
+
+    # ------------------------------------------------------------------
+    # Self-test
+    # ------------------------------------------------------------------
+
+    def run_self_test(self) -> Dict[str, Any]:
+        """
+        Lightweight core self-test.
+
+        Returns a dict summarizing the status of key subsystems.
+        This is intentionally simple and offline-only.
+        """
+        results: Dict[str, Any] = {
+            "timestamp": __import__("time").time(),
+            "results": {
+                "rag": {"status": "missing"},
+                "agent_manager": {"status": "missing"},
+                "model_manager": {"status": "missing"},
+                "memory": {"status": "missing"},
+            },
+        }
+
+        # RAG
+        results["results"]["rag"]["status"] = "ok" if self.rag_manager is not None else "missing"
+
+        # AgentManager
+        if self.agent_manager is not None:
+            try:
+                agents = getattr(self.agent_manager, "list_agents", lambda: [])()
+                results["results"]["agent_manager"] = {"status": "ok", "agents": agents}
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Self-test: AgentManager failed: %s", exc)
+                results["results"]["agent_manager"] = {"status": "error", "error": str(exc)}
+        else:
+            results["results"]["agent_manager"] = {"status": "missing"}
+
+        # ModelManager
+        if self.model_manager is not None:
+            try:
+                ok, msg = self.model_status_check()
+                models = getattr(self.model_manager, "list_models", lambda: [])()
+                results["results"]["model_manager"] = {
+                    "status": "ok" if ok else "degraded",
+                    "message": msg,
+                    "models": models,
+                }
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Self-test: ModelManager failed: %s", exc)
+                results["results"]["model_manager"] = {"status": "error", "error": str(exc)}
+        else:
+            results["results"]["model_manager"] = {"status": "missing"}
+
+        # Memory
+        if self.memory_manager is not None:
+            try:
+                _ = self.memory_manager.read_system_memory()  # type: ignore[union-attr]
+                results["results"]["memory"] = {"status": "ok"}
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Self-test: MemoryManager failed: %s", exc)
+                results["results"]["memory"] = {"status": "error", "error": str(exc)}
+        else:
+            results["results"]["memory"] = {"status": "missing"}
+
+        logger.info("Self-test complete.")
+        return results
+
+
+# ---------------------------------------------------------------------------
+# Singleton helper
+# ---------------------------------------------------------------------------
+
+_core_singleton: Optional[PrimusCore] = None
 
 
 def get_primus_core(singleton: bool = True) -> PrimusCore:
-    global _primus_singleton
-    if singleton and _primus_singleton:
-        return _primus_singleton
-    pc = PrimusCore()
-    if singleton:
-        _primus_singleton = pc
-    return pc
+    """
+    Return a PrimusCore instance.
+
+    - singleton=True (default): return a shared process-local instance.
+    - singleton=False: return a new PrimusCore every call.
+    """
+    global _core_singleton
+
+    if not singleton:
+        return PrimusCore()
+
+    if _core_singleton is None:
+        _core_singleton = PrimusCore()
+
+    return _core_singleton
 
 
-# Simple CLI for quick tests (when run directly)
-def _cli():
-    import argparse
-
-    parser = argparse.ArgumentParser(description="PRIMUS Core CLI")
-    parser.add_argument("--self-test", action="store_true", help="Run quick self-test")
-    parser.add_argument("--status", action="store_true", help="Print status")
-    args = parser.parse_args()
-
-    primus = get_primus_core()
-    init_status = primus.initialize()
-    print("Initialize:", json.dumps(init_status, indent=2))
-
-    if args.status:
-        print(json.dumps(primus.get_status(), indent=2))
-
-    if args.self_test:
-        st = primus.run_self_test()
-        print("Self-test:", json.dumps(st, indent=2))
-
-
-if __name__ == "__main__":
-    _cli()
+__all__ = ["PrimusCore", "get_primus_core"]

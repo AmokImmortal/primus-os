@@ -77,7 +77,10 @@ class SecurityGate:
         return self._state.mode
 
     def is_captains_log_active(self) -> bool:
-        return self._state.mode is PrimusMode.CAPTains_LOG if hasattr(PrimusMode, "CAPTains_LOG") else self._state.mode is PrimusMode.CAPTAINS_LOG  # type: ignore[attr-defined]
+        """
+        True if PRIMUS is currently in Captain's Log Master Root mode.
+        """
+        return self._state.mode is PrimusMode.CAPTAINS_LOG
 
     # -------------------------------------------------
     # External network toggle
@@ -101,7 +104,7 @@ class SecurityGate:
         This is primarily used when deciding what YOU (the local user)
         are allowed to see or modify in a given mode.
         """
-        if self._state.mode is PrimusMode.CAPTains_LOG if hasattr(PrimusMode, "CAPTains_LOG") else self._state.mode is PrimusMode.CAPTAINS_LOG:  # type: ignore[attr-defined]
+        if self._state.mode is PrimusMode.CAPTAINS_LOG:
             return Role.MASTER_ROOT
         if self._state.mode is PrimusMode.MASTER_USER:
             return Role.MASTER_USER
@@ -166,9 +169,7 @@ class SecurityGate:
         """
         return {
             "mode": self._state.mode.name.lower(),
-            "captains_log_active": bool(
-                self._state.mode is PrimusMode.CAPTains_LOG if hasattr(PrimusMode, "CAPTains_LOG") else self._state.mode is PrimusMode.CAPTAINS_LOG  # type: ignore[attr-defined]
-            ),
+            "captains_log_active": self.is_captains_log_active(),
             "external_network_allowed": self._state.external_network_allowed,
         }
 

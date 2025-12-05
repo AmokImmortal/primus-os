@@ -25,7 +25,7 @@ import os
 import sys
 import traceback
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional
 
 # ---------------------------------------------------------------------------
 # Path setup
@@ -164,9 +164,9 @@ class PrimusRuntime:
 
         if self._core is None:
             logger.info("Creating PrimusCore instance from runtime...")
-            self._core = get_primus_core(singleton=True)
-            init_status = self._core.initialize()
-            logger.info("PrimusCore initialized with status: %s", json.dumps(init_status, indent=2))
+            self._core = get_primus_core()
+            self._core.initialize()
+            logger.info("PrimusCore instance created.")
 
         return self._core
 
@@ -375,8 +375,14 @@ class PrimusRuntime:
         # Subchat system
         if core is not None:
             try:
-                if core.subchat_loader and core.subchat_security:
-                    count = len(core.list_subchats())
+                if getattr(core, "subchat_engine", None) is not None:
+                    engine = core.subchat_engine
+                    count = 0
+                    if hasattr(engine, "get_subchat_count"):
+                        try:
+                            count = engine.get_subchat_count()  # type: ignore[attr-defined]
+                        except Exception:
+                            count = 0
                     print(f"SubChat system : WORKING ({count} subchats discovered)")
                     logger.info("Bootup Test - Subchats OK (%d subchats).", count)
                 else:
@@ -389,10 +395,20 @@ class PrimusRuntime:
 
             # Model backend
             try:
-                model_ok, model_msg = core.model_status_check()
-                print(f"Model backend : {'WORKING' if model_ok else 'FAILED'} ({model_msg})")
-                logger.info("Bootup Test - Model backend: ok=%s msg=%s", model_ok, model_msg)
-                if not model_ok:
+                if core.model_manager is not None:
+                    mm = core.model_manager
+                    if hasattr(mm, "get_backend_status"):
+                        ok, msg, meta = mm.get_backend_status()  # type: ignore[attr-defined]
+                        print(f"Model backend : {'WORKING' if ok else 'FAILED'} ({msg})")
+                        logger.info("Bootup Test - Model backend: ok=%s msg=%s meta=%s", ok, msg, meta)
+                        if not ok:
+                            ok_all = False
+                    else:
+                        print("Model backend : UNKNOWN (no status API)")
+                        logger.warning("Bootup Test - ModelManager has no get_backend_status().")
+                else:
+                    print("Model backend : MISSING (ModelManager not initialized)")
+                    logger.warning("Bootup Test - ModelManager missing.")
                     ok_all = False
             except Exception as exc:  # noqa: BLE001
                 print(f"Model backend : FAILED ({exc})")
