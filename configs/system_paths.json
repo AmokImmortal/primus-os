@@ -1,0 +1,11 @@
+{
+    "root": "./System",
+    "core_boot": "core/boot",
+    "intelligence_dispatcher": "intelligence/dispatcher",
+    "agents": "agents",
+    "logs": "logs",
+    "captains_log_vault": "captains_log_vault",
+    "checkpoints": "checkpoints",
+    "rag": "rag",
+    "interfaces": "interfaces"
+}

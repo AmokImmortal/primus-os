@@ -1,0 +1,11 @@
+{
+  "0ca589cc-f05f-47ac-9445-4df33f39a9ef": {
+    "source": "test",
+    "chunk": 0
+  },
+  "9f5990e3-6da2-4dff-ac9f-1fc3493c59dc": {
+    "source_file": "test_docs\\test1.txt",
+    "chunk_index": 0,
+    "text": "This is a test document for PRIMUS RAG ingest system."
+  }
+}

@@ -1,0 +1,24 @@
+# === Core LLM + Inference ===
+llama-cpp-python>=0.2.0
+requests>=2.31.0
+
+# === RAG / Embedding Storage ===
+numpy>=1.26.0
+pandas>=2.2.0
+
+# === Data Models & Validation ===
+pydantic>=2.7.0
+
+# === Environment Variables ===
+python-dotenv>=1.0.1
+
+# === Utility / Support Libraries ===
+tqdm>=4.66.0
+rich>=13.7.0
+
+# === Optional: if you use LM Studio local API ===
+# (not required for llama-cpp, but included for flexibility)
+httpx>=0.26.0
+
+# === Optional CLI tools (color, formatting) ===
+click>=8.1.7

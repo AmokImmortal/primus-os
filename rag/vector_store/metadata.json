@@ -1,0 +1,7 @@
+[
+  {
+    "source_file": "test_docs\\test1.txt",
+    "chunk_index": 0,
+    "text": "This is a test document for PRIMUS RAG ingest system."
+  }
+]
