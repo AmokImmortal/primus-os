@@ -8,7 +8,7 @@ Command-line interface for PRIMUS OS (Core developer/admin CLI).
   the CLI still runs and provides clear guidance.
 
 Place this file at:
-r"C:\P.R.I.M.U.S OS\System\primus_cli.py"
+"C:\\P.R.I.M.U.S OS\\System\\primus_cli.py"
 
 Usage examples:
     python primus_cli.py status
@@ -60,6 +60,22 @@ logger = logging.getLogger("primus_cli")
 # -----------------------
 # Utilities
 # -----------------------
+def set_log_level(level_name: str) -> None:
+    """Update logging verbosity for the CLI session."""
+
+    level = getattr(logging, level_name.upper(), logging.INFO)
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
+    logger.setLevel(level)
+
+    for handler in root_logger.handlers:
+        handler.setLevel(level)
+    for handler in logger.handlers:
+        handler.setLevel(level)
+
+    logger.debug("Log level set to %s", level_name)
+
+
 def safe_import(module: str, attr: Optional[str] = None):
     """
     Attempt to import a module or a module.attr. Return the imported object or None.
@@ -450,6 +466,7 @@ def cmd_chat(args):
             print("PRIMUS>", "(no runtime send method available)")
 
 
+
 def cmd_subchats(args):
     runtime, _ = get_runtime()
     if not runtime:
@@ -485,6 +502,7 @@ def cmd_subchats(args):
         print("Runtime does not expose create_subchat().")
 
 
+
 def cmd_logs(args):
     lf = LOG_FILE
     if lf.exists():
@@ -496,6 +514,7 @@ def cmd_logs(args):
         print("No CLI log file found.")
 
 
+
 def cmd_debug(args):
     print("Debug info:")
     cmd_status(args)
@@ -504,11 +523,71 @@ def cmd_debug(args):
     print("PYTHONPATH:", os.environ.get("PYTHONPATH", "").split(os.pathsep)[:3])
 
 
+def cmd_captains_log(args):
+    """Captain's Log Master Root Mode controls (Phase 1)."""
+
+    runtime, _ = get_runtime()
+    if not runtime:
+        print("Runtime not available. Ensure primus_runtime exists.")
+        return
+
+    sub = getattr(args, "cl_command", None)
+    if sub == "enter":
+        if hasattr(runtime, "enter_captains_log_mode"):
+            try:
+                runtime.enter_captains_log_mode()
+                print("Captain's Log Master Root Mode: ACTIVE")
+            except Exception:
+                logger.exception("Failed to enter Captain's Log mode")
+                show_trace()
+        else:
+            print("Runtime does not expose enter_captains_log_mode().")
+        return
+
+    if sub == "exit":
+        if hasattr(runtime, "exit_captains_log_mode"):
+            try:
+                runtime.exit_captains_log_mode()
+                print("Captain's Log Master Root Mode: INACTIVE")
+            except Exception:
+                logger.exception("Failed to exit Captain's Log mode")
+                show_trace()
+        else:
+            print("Runtime does not expose exit_captains_log_mode().")
+        return
+
+    if sub == "status":
+        manager = getattr(runtime, "captains_log_manager", None)
+        status = None
+        if manager and hasattr(manager, "get_status"):
+            try:
+                status = manager.get_status()
+            except Exception:
+                logger.exception("Failed to retrieve Captain's Log status")
+                show_trace()
+
+        if status is None:
+            status = {"status": "unavailable", "mode": "unknown"}
+
+        mode = status.get("mode", "unknown")
+        health = status.get("status", "unknown")
+        print(f"Captain's Log system : {health.upper()} (mode={mode})")
+        return
+
+    print("Unsupported Captain's Log command.")
+
+
 # -----------------------
 # CLI argument parsing
 # -----------------------
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="primus", description="PRIMUS OS CLI")
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Logging verbosity for CLI operations",
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     # status
@@ -563,6 +642,16 @@ def build_parser() -> argparse.ArgumentParser:
     subchat_create.add_argument("--private", action="store_true", help="Mark subchat private")
     subchat_create.set_defaults(func=cmd_subchats)
 
+    # Captain's Log controls
+    p_cl = sub.add_parser("cl", help="Captain's Log Master Root Mode controls")
+    cl_sub = p_cl.add_subparsers(dest="cl_command", required=True)
+    cl_enter = cl_sub.add_parser("enter", help="Enter Captain's Log Master Root Mode")
+    cl_enter.set_defaults(func=cmd_captains_log)
+    cl_exit = cl_sub.add_parser("exit", help="Exit Captain's Log Master Root Mode")
+    cl_exit.set_defaults(func=cmd_captains_log)
+    cl_status = cl_sub.add_parser("status", help="Show Captain's Log status")
+    cl_status.set_defaults(func=cmd_captains_log)
+
     # chat
     p_chat = sub.add_parser("chat", help="Single-turn chat or interactive REPL if no message is provided")
     p_chat.add_argument("message", nargs="?", help="Optional single-turn message to send to PRIMUS")
@@ -585,6 +674,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main():
     parser = build_parser()
     args = parser.parse_args()
+    set_log_level(getattr(args, "log_level", "INFO"))
     try:
         if hasattr(args, "func"):
             args.func(args)
