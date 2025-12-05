@@ -1,22 +1,17 @@
 """Captain's Log Master Root mode manager (framework only).
 
 This module provides a minimal, import-safe Captain's Log manager that wraps the
-shared state object exposed by ``cl_state`` and orchestrates access to the
-private Captain's Log journal. It intentionally avoids implementing RAG,
-encryption, or any additional file I/O beyond journal delegation. The purpose
-is to offer a stable API for the runtime and future subsystems while remaining
-side-effect free.
+shared state object exposed by ``cl_state``. It intentionally avoids
+implementing journaling, RAG, encryption, or any file I/O in this phase. The
+purpose is to offer a stable API for the runtime and future subsystems while
+remaining side-effect free.
 """
 
 from __future__ import annotations
 
-import logging
 from typing import Dict, Optional
 
 from System.captains_log import cl_state
-from captains_log.cl_journal import CaptainLogJournal
-
-logger = logging.getLogger(__name__)
 
 
 class CaptainsLogManager:
@@ -30,7 +25,6 @@ class CaptainsLogManager:
 
     def __init__(self, state: Optional[cl_state.CaptainsLogState] = None) -> None:
         self._state = state or cl_state.get_state()
-        self._journal = CaptainLogJournal()
 
     # ------------------------------------------------------------------
     # Core mode controls
@@ -56,41 +50,6 @@ class CaptainsLogManager:
 
         mode = "captains_log" if self.is_in_captains_log() else "normal"
         return {"status": "ok", "mode": mode}
-
-    # ------------------------------------------------------------------
-    # Journal controls
-    # ------------------------------------------------------------------
-
-    def _ensure_active(self) -> None:
-        if not self.is_in_captains_log():
-            raise PermissionError("Captain's Log journaling is only available in Captain's Log mode.")
-
-    def add_journal_entry(self, text: str, mode: str = "root") -> Dict[str, object]:
-        """Add a journal entry when Captain's Log mode is active."""
-
-        self._ensure_active()
-        entry = self._journal.add_entry(text=text, mode=mode)
-        logger.info("Captain's Log journal entry added")
-        return entry
-
-    def list_journal_entries(self, limit: Optional[int] = None) -> list[Dict[str, object]]:
-        """List journal entry metadata when Captain's Log mode is active."""
-
-        self._ensure_active()
-        return self._journal.list_entries(limit=limit)
-
-    def read_journal_entry(self, entry_id: str) -> Optional[Dict[str, object]]:
-        """Read a journal entry by id when Captain's Log mode is active."""
-
-        self._ensure_active()
-        return self._journal.read_entry(entry_id)
-
-    def clear_journal(self) -> None:
-        """Clear all journal entries when Captain's Log mode is active."""
-
-        self._ensure_active()
-        self._journal.clear_all()
-        logger.info("Captain's Log journal cleared")
 
     # ------------------------------------------------------------------
     # Placeholder hooks (no-ops for Phase 1)
