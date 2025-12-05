@@ -8,7 +8,7 @@ Command-line interface for PRIMUS OS (Core developer/admin CLI).
   the CLI still runs and provides clear guidance.
 
 Place this file at:
-r"C:\P.R.I.M.U.S OS\System\primus_cli.py"
+"C:\\P.R.I.M.U.S OS\\System\\primus_cli.py"
 
 Usage examples:
     python primus_cli.py status
@@ -60,6 +60,22 @@ logger = logging.getLogger("primus_cli")
 # -----------------------
 # Utilities
 # -----------------------
+def set_log_level(level_name: str) -> None:
+    """Update logging verbosity for the CLI session."""
+
+    level = getattr(logging, level_name.upper(), logging.INFO)
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
+    logger.setLevel(level)
+
+    for handler in root_logger.handlers:
+        handler.setLevel(level)
+    for handler in logger.handlers:
+        handler.setLevel(level)
+
+    logger.debug("Log level set to %s", level_name)
+
+
 def safe_import(module: str, attr: Optional[str] = None):
     """
     Attempt to import a module or a module.attr. Return the imported object or None.
@@ -509,6 +525,12 @@ def cmd_debug(args):
 # -----------------------
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="primus", description="PRIMUS OS CLI")
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Logging verbosity for CLI operations",
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     # status
@@ -585,6 +607,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main():
     parser = build_parser()
     args = parser.parse_args()
+    set_log_level(getattr(args, "log_level", "INFO"))
     try:
         if hasattr(args, "func"):
             args.func(args)
