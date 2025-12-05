@@ -1,6 +1,10 @@
 venv/
 __pycache__/
-core/logs/
-core/system_logs/
-*.log
 *.gguf
+*.dll
+*.so
+*.dylib
+*.log
+*.tmp
+*.bin
+*.exe

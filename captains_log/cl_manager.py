@@ -7,103 +7,141 @@ purpose is to offer a stable API for the runtime and future subsystems while
 remaining side-effect free.
 """
 
-from __future__ import annotations
+from pathlib import Path
+from typing import Optional, List, Dict, Any
 
-from typing import Dict, Optional
-
-from System.captains_log import cl_state
+from .cl_state import CaptainsLogState
+from .cl_journal import JournalStore
+from .cl_rag import CaptainsLogRAG
 
 
 class CaptainsLogManager:
-    """High-level manager for Captain's Log Master Root Mode.
+    """
+    Controls Captain’s Log Master Root Mode and its private journal + RAG.
 
-    The manager exposes a minimal state machine for entering and exiting
-    Captain's Log mode. Placeholder hooks exist for RAG folder management,
-    secure storage, development logging toggles, and encryption integration, but
-    they intentionally perform no work in this phase.
+    Rules:
+    - All journal and RAG operations require Captain’s Log mode to be active.
+    - No journal text or RAG contents are exposed to other subsystems.
+    - No automatic logging of sensitive content.
     """
 
-    def __init__(self, state: Optional[cl_state.CaptainsLogState] = None) -> None:
-        self._state = state or cl_state.get_state()
+    def __init__(self) -> None:
+        # Mode state
+        self.state = CaptainsLogState()
 
-    # ------------------------------------------------------------------
-    # Core mode controls
-    # ------------------------------------------------------------------
+        # Private journal storage (on disk, JSONL)
+        self.journal = JournalStore(Path("private/captains_log/journal.jsonl"))
 
-    def enter_captains_log(self) -> None:
-        """Enter Captain's Log mode (no journaling/RAG/encryption yet)."""
+        # Private in-memory RAG for Captain's Log
+        self.rag = CaptainsLogRAG(self.state)
 
-        cl_state.enter_captains_log_mode()
+    # -------------------------------------------------
+    # Mode control
+    # -------------------------------------------------
+    def enter(self) -> bool:
+        self.state.enter()
+        return True
 
-    def exit_captains_log(self) -> None:
-        """Exit Captain's Log mode."""
-
-        cl_state.exit_captains_log_mode()
-
-    def is_in_captains_log(self) -> bool:
-        """Return True if Captain's Log mode is active."""
-
-        return self._state.is_active
-
-    def get_status(self) -> Dict[str, object]:
-        """Return a minimal status dictionary for bootup diagnostics."""
-
-        mode = "captains_log" if self.is_in_captains_log() else "normal"
-        return {"status": "ok", "mode": mode}
-
-    # ------------------------------------------------------------------
-    # Placeholder hooks (no-ops for Phase 1)
-    # ------------------------------------------------------------------
-
-    def ensure_rag_folder(self) -> None:
-        """Placeholder for RAG folder management (no-op)."""
-
-        return None
-
-    def configure_secure_storage(self) -> None:
-        """Placeholder for secure storage hooks (no-op)."""
-
-        return None
-
-    def start_development_logging(self) -> None:
-        """Placeholder for starting development logging (no-op)."""
-
-        return None
-
-    def stop_development_logging(self) -> None:
-        """Placeholder for stopping development logging (no-op)."""
-
-        return None
-
-    def setup_encryption(self) -> None:
-        """Placeholder for future encryption integration (no-op)."""
-
-        return None
-
-    # ------------------------------------------------------------------
-    # Compatibility wrappers (maintain existing call sites)
-    # ------------------------------------------------------------------
-
-    def enter(self) -> None:
-        """Compatibility wrapper for ``enter_captains_log``."""
-
-        self.enter_captains_log()
-
-    def exit(self) -> None:
-        """Compatibility wrapper for ``exit_captains_log``."""
-
-        self.exit_captains_log()
+    def exit(self) -> bool:
+        self.state.exit()
+        return True
 
     def is_active(self) -> bool:
-        """Compatibility wrapper for ``is_in_captains_log``."""
+        return bool(getattr(self.state, "active", False))
 
-        return self.is_in_captains_log()
+    def current_mode(self) -> str:
+        return "captains_log" if self.is_active() else "normal"
+
+    def get_status(self) -> Dict[str, Any]:
+        """
+        Minimal status used by bootup tests and diagnostics.
+        Does NOT include any journal or RAG contents.
+        """
+        return {
+            "status": "ok",
+            "active": self.is_active(),
+            "mode": self.current_mode(),
+        }
+
+    # -------------------------------------------------
+    # Journal operations
+    # -------------------------------------------------
+    def _ensure_active(self) -> None:
+        if not self.is_active():
+            raise PermissionError("Captain’s Log operations require Captain’s Log mode to be active.")
+
+    def add_journal_entry(self, text: str) -> Dict[str, Any]:
+        """
+        Add a new journal entry and ingest it into the private RAG memory.
+
+        Returns the full entry dict (id, timestamp, mode, text).
+        """
+        self._ensure_active()
+        entry_id = self.journal.add_entry(text, mode="master_root")
+
+        # Fetch the new entry so we can mirror it into RAG.
+        entries = self.journal.list_entries()
+        entry: Dict[str, Any] | None = None
+        for e in entries:
+            if e.get("id") == entry_id:
+                entry = e
+                break
+
+        if entry is not None:
+            # Ingest into private Captain's Log RAG memory.
+            self.rag.ingest_entry(entry)
+
+        return entry or {"id": entry_id, "text": text, "mode": "master_root"}
+
+    def list_journal_entries(self) -> List[Dict[str, Any]]:
+        """
+        List all journal entries (metadata + text).
+        Only allowed in Captain’s Log mode.
+        """
+        self._ensure_active()
+        return self.journal.list_entries()
+
+    def clear_journal(self) -> None:
+        """
+        Clear ALL journal data and the associated RAG memory.
+        Only allowed in Captain’s Log mode.
+        """
+        self._ensure_active()
+        self.journal.clear()
+        self.rag.clear()
+
+    # -------------------------------------------------
+    # RAG operations (private to Captain's Log)
+    # -------------------------------------------------
+    def search_rag(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
+        """
+        Search the Captain's Log private RAG memory.
+
+        Phase 1: naive text search implemented by CaptainsLogRAG.
+        """
+        self._ensure_active()
+        return self.rag.search(query, limit=limit)
+
+    def rebuild_rag_from_journal(self) -> None:
+        """
+        Rebuild the private Captain's Log RAG memory from all journal entries.
+        Useful if the in-memory RAG is reset or implementation changes.
+        """
+        self._ensure_active()
+        entries = self.journal.list_entries()
+        self.rag.clear()
+        if entries:
+            self.rag.bulk_ingest(entries)
 
 
-_manager = CaptainsLogManager()
+# -------------------------------------------------
+# Singleton accessor
+# -------------------------------------------------
+_manager: Optional[CaptainsLogManager] = None
 
 
 def get_manager() -> CaptainsLogManager:
-    """Return the shared Captain's Log manager instance."""
-
+    global _manager
+    if _manager is None:
+        _manager = CaptainsLogManager()
     return _manager
