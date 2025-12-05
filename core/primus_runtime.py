@@ -13,7 +13,7 @@ Responsibilities:
 - Run core security + diagnostic self-tests during startup when requested.
 
 Location (example):
-    r"C:\P.R.I.M.U.S OS\System\core\primus_runtime.py"
+    "C:\\P.R.I.M.U.S OS\\System\\core\\primus_runtime.py"
 """
 
 from __future__ import annotations
