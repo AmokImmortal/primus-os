@@ -8,7 +8,7 @@ Command-line interface for PRIMUS OS (Core developer/admin CLI).
   the CLI still runs and provides clear guidance.
 
 Place this file at:
-r"C:\P.R.I.M.U.S OS\System\primus_cli.py"
+"C:\\P.R.I.M.U.S OS\\System\\primus_cli.py"
 
 Usage examples:
     python primus_cli.py status
