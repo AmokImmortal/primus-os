@@ -24,666 +24,270 @@ Usage examples:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import sys
-import traceback
-from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Optional, Any, Dict
 
-# -----------------------
-# Basic environment setup
-# -----------------------
-# Guess system root (assume this file lives in the System root)
-SYSTEM_ROOT = Path(__file__).resolve().parent
+# ---------------------------------------------------------------------
+# Path setup so imports work when running from the System directory
+# ---------------------------------------------------------------------
 
-# Ensure the System root and its parent are importable so core modules load
-for _path in (SYSTEM_ROOT, SYSTEM_ROOT.parent):
-    if str(_path) not in sys.path:
-        sys.path.insert(0, str(_path))
-LOG_DIR = SYSTEM_ROOT / "core" / "system_logs"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
-LOG_FILE = LOG_DIR / "primus_cli.log"
+THIS_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = THIS_DIR
+CORE_DIR = os.path.join(PROJECT_ROOT, "core")
+CAPTAINS_LOG_DIR = os.path.join(PROJECT_ROOT, "captains_log")
+
+for p in (PROJECT_ROOT, CORE_DIR, CAPTAINS_LOG_DIR):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+
+# ---------------------------------------------------------------------
+# Imports with fallbacks
+# ---------------------------------------------------------------------
+
+try:
+    from core.primus_runtime import PrimusRuntime  # type: ignore
+except ImportError:
+    from primus_runtime import PrimusRuntime  # type: ignore
+
+try:
+    from captains_log.cl_manager import get_manager as get_cl_manager  # type: ignore
+except ImportError:  # defensive; CLI still works for non-CL commands
+    def get_cl_manager() -> Any:  # type: ignore
+        raise RuntimeError("Captain's Log manager is not available")
+
+
+logger = logging.getLogger("primus_cli")
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(LOG_FILE, encoding="utf-8"),
-        logging.StreamHandler(sys.stdout),
-    ],
 )
-logger = logging.getLogger("primus_cli")
 
 
-# -----------------------
-# Utilities
-# -----------------------
-def set_log_level(level_name: str) -> None:
-    """Update logging verbosity for the CLI session."""
-
-    level = getattr(logging, level_name.upper(), logging.INFO)
-    root_logger = logging.getLogger()
-    root_logger.setLevel(level)
-    logger.setLevel(level)
-
-    for handler in root_logger.handlers:
-        handler.setLevel(level)
-    for handler in logger.handlers:
-        handler.setLevel(level)
-
-    logger.debug("Log level set to %s", level_name)
+# ---------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------
 
 
-def safe_import(module: str, attr: Optional[str] = None):
+def _make_runtime(mode: str = "normal") -> PrimusRuntime:
     """
-    Attempt to import a module or a module.attr. Return the imported object or None.
+    Construct a PrimusRuntime suitable for CLI use.
+    We prefer non_interactive=True so it does not try to open UI loops.
     """
     try:
-        if attr:
-            mod = __import__(module, fromlist=[attr])
-            return getattr(mod, attr)
-        else:
-            return __import__(module)
-    except Exception as e:
-        logger.debug(f"safe_import failed for {module}.{attr or ''}: {e}")
+        rt = PrimusRuntime(mode=mode, non_interactive=True)
+    except TypeError:
+        # Fallback if constructor signature is different
+        rt = PrimusRuntime()  # type: ignore
+    return rt
+
+
+# ---------------------------------------------------------------------
+# Chat command
+# ---------------------------------------------------------------------
+
+
+def cmd_chat(args: argparse.Namespace) -> int:
+    runtime = _make_runtime()
+    if not hasattr(runtime, "chat_once"):
+        print("Runtime does not expose chat_once(); no response available.")
+        return 1
+
+    user_message: str = args.message
+    try:
+        reply = runtime.chat_once(user_message)  # type: ignore[attr-defined]
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.exception("chat_once failed: %s", exc)
+        print("Error: chat_once failed; see logs for details.")
+        return 1
+
+    if reply is not None:
+        print(reply)
+    else:
+        print("No reply from PRIMUS (None returned).")
+    return 0
+
+
+# ---------------------------------------------------------------------
+# Captain's Log commands
+# ---------------------------------------------------------------------
+
+
+def _runtime_cl_status(runtime: PrimusRuntime) -> Optional[Dict[str, Any]]:
+    """
+    Try to get Captain's Log status via PrimusRuntime, with fallbacks.
+    """
+    # Preferred: dedicated runtime method if present
+    if hasattr(runtime, "get_captains_log_status"):
+        try:
+            return runtime.get_captains_log_status()  # type: ignore[attr-defined]
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("get_captains_log_status() failed: %s", exc)
+
+    # Fallback: use the Captain's Log manager directly
+    try:
+        mgr = get_cl_manager()
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Captain's Log manager not available: %s", exc)
         return None
 
-
-def pretty_print_object(obj: Any):
-    try:
-        print(json.dumps(obj, indent=2, default=str, ensure_ascii=False))
-    except Exception:
-        print(repr(obj))
-
-
-def show_trace():
-    traceback.print_exc()
-
-
-# -----------------------
-# Component helpers
-# -----------------------
-def get_runtime():
-    """
-    Try to import a Primus runtime object from a few likely locations.
-    Returns (instance, note) where instance may be None.
-    """
-    # Candidate class paths (based on our project structure variations)
-    candidates = [
-        ("core.primus_runtime", "PrimusRuntime"),
-        ("primus_runtime", "PrimusRuntime"),
-        ("core.engine", "PrimusRuntime"),
-    ]
-    for module, cls in candidates:
-        cls_obj = safe_import(module, cls)
-        if cls_obj:
+    # Try several possible manager APIs
+    for attr in ("get_status", "get_state", "status"):
+        if hasattr(mgr, attr):
             try:
-                inst = cls_obj()
-                logger.debug(f"Instantiated runtime from {module}.{cls}")
-                return inst, f"{module}.{cls}"
-            except Exception as e:
-                logger.debug(f"Found class {module}.{cls} but failed to instantiate: {e}")
-                try:
-                    # maybe it's a module-level singleton factory
-                    module_obj = safe_import(module)
-                    if hasattr(module_obj, "get_runtime"):
-                        inst = module_obj.get_runtime()
-                        return inst, f"{module}.get_runtime()"
-                except Exception:
-                    pass
-    return None, None
+                status = getattr(mgr, attr)()
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("Captain's Log manager.%s() failed: %s", attr, exc)
+                return None
 
+            # Normalize to dict if needed
+            if isinstance(status, dict):
+                return status
+            # Maybe it's a dataclass-like object with attributes
+            active = getattr(status, "active", None)
+            if active is None:
+                active = getattr(status, "is_active", None)
+            mode = getattr(status, "mode", None)
+            return {"active": active, "mode": mode}
 
-def get_agent_manager():
-    # core.agent_manager.AgentManager or core.agent_manager.AgentManagerService
-    candidates = [
-        ("core.agent_manager", "AgentManager"),
-        ("core.agent_manager", "AgentManagerService"),
-        ("core.agent_manager", None),
-    ]
-    for module, cls in candidates:
-        if cls:
-            cls_obj = safe_import(module, cls)
-            if cls_obj:
-                try:
-                    return cls_obj()
-                except Exception:
-                    return cls_obj  # maybe class, return class reference
-        else:
-            mod = safe_import(module)
-            if mod:
-                # try common factory names
-                if hasattr(mod, "AgentManager"):
-                    try:
-                        return getattr(mod, "AgentManager")()
-                    except Exception:
-                        return getattr(mod, "AgentManager")
-                return mod
     return None
 
 
-def get_rag_manager():
-    # rag_manager may live in core or rag package
-    candidates = [
-        ("core.rag_manager", "RAGManager"),
-        ("rag.rag_manager", "RAGManager"),
-        ("rag_manager", "RAGManager"),
-        ("rag.rag_manager", None),
-    ]
-    for module, cls in candidates:
-        if cls:
-            cls_obj = safe_import(module, cls)
-            if cls_obj:
-                try:
-                    return cls_obj()
-                except Exception:
-                    return cls_obj
-        else:
-            mod = safe_import(module)
-            if mod:
-                return mod
-    return None
+def cmd_cl_status(args: argparse.Namespace) -> int:
+    runtime = _make_runtime()
+    status = _runtime_cl_status(runtime)
+
+    if not status:
+        print("Captain's Log system : UNKNOWN (status unavailable)")
+        return 1
+
+    active = status.get("active") or status.get("is_active")
+    mode = status.get("mode", "unknown")
+    print(f"Captain's Log system : OK (mode={mode})")
+    return 0
 
 
-# -----------------------
-# CLI Command implementations
-# -----------------------
-def cmd_status(args):
-    logger.info("PRIMUS CLI: status requested")
-    # Basic status
-    info = {
-        "system_root": str(SYSTEM_ROOT),
-        "python": sys.version,
-        "cwd": os.getcwd(),
-        "log_file": str(LOG_FILE),
-    }
+def cmd_cl_enter(args: argparse.Namespace) -> int:
+    runtime = _make_runtime()
+    logger.info("PrimusRuntime: enter Captain's Log requested.")
 
-    runtime, where = get_runtime()
-    info["runtime_loaded"] = bool(runtime)
-    info["runtime_source"] = where
-
-    agent_mgr = get_agent_manager()
-    info["agent_manager_loaded"] = bool(agent_mgr)
-
-    rag_mgr = get_rag_manager()
-    info["rag_manager_loaded"] = bool(rag_mgr)
-
-    pretty_print_object(info)
-
-
-def cmd_self_test(args):
-    logger.info("PRIMUS CLI: self-test requested")
-    runtime, where = get_runtime()
-    if not runtime:
-        logger.error("Runtime not found. Cannot run self-test. (looked in core.primus_runtime)")
-        print("Runtime object not available. Ensure core/primus_runtime.py exists and exposes PrimusRuntime().")
-        return
-
-    if hasattr(runtime, "run_bootup_test"):
+    # Preferred: runtime method
+    if hasattr(runtime, "enter_captains_log"):
         try:
-            res = runtime.run_bootup_test()
-            logger.info("Bootup/self-tests completed.")
-            pretty_print_object(res)
-            return
-        except Exception:
-            logger.exception("Bootup test failed with exception:")
-            show_trace()
-            return
-
-    # Fallback: try individual components
-    results = {}
-    try:
-        if hasattr(runtime, "boot_test"):
-            results["boot_test"] = runtime.boot_test()
-        if hasattr(runtime, "test_agents"):
-            results["agents"] = runtime.test_agents()
-    except Exception:
-        logger.exception("Runtime self-test fallback failed.")
-        show_trace()
-    pretty_print_object(results)
-
-
-def cmd_start(args):
-    logger.info("PRIMUS CLI: start requested")
-    runtime, _ = get_runtime()
-    if not runtime:
-        print("Runtime not found. Ensure primus runtime exists.")
-        return
-    if hasattr(runtime, "start"):
-        try:
-            runtime.start()
-            print("PRIMUS runtime started.")
-        except Exception:
-            logger.exception("Error starting runtime")
-            show_trace()
+            runtime.enter_captains_log()  # type: ignore[attr-defined]
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception("enter_captains_log() failed: %s", exc)
+            print("Error: failed to enter Captain's Log; see logs for details.")
+            return 1
     else:
-        print("Runtime does not implement start(). You can still interact with agents directly.")
-
-
-def cmd_stop(args):
-    logger.info("PRIMUS CLI: stop requested")
-    runtime, _ = get_runtime()
-    if not runtime:
-        print("Runtime not found.")
-        return
-    if hasattr(runtime, "stop"):
+        # Fallback: direct manager call
         try:
-            runtime.stop()
-            print("PRIMUS runtime stopped.")
-        except Exception:
-            logger.exception("Error stopping runtime")
-            show_trace()
-    else:
-        print("Runtime does not implement stop().")
-
-
-def cmd_agent(args):
-    sub = args.agent_command
-    am = get_agent_manager()
-    if not am:
-        print("Agent manager not available. Ensure core/agent_manager.py exists.")
-        return
-
-    if sub == "list":
-        if hasattr(am, "list_agents"):
-            try:
-                agents = am.list_agents()
-                pretty_print_object(agents)
-            except Exception:
-                logger.exception("Failed to list agents")
-                show_trace()
-        else:
-            # try attribute 'agents' or inspect filesystem
-            if hasattr(am, "agents"):
-                pretty_print_object(getattr(am, "agents"))
+            mgr = get_cl_manager()
+            if hasattr(mgr, "enter"):
+                mgr.enter()
+            elif hasattr(mgr, "activate"):
+                mgr.activate()
             else:
-                # fallback: scan agents directory
-                agents_path = SYSTEM_ROOT / "agents"
-                if agents_path.exists():
-                    agents = [p.name for p in agents_path.iterdir() if p.is_dir()]
-                    pretty_print_object(agents)
-                else:
-                    print("No agents directory found.")
-        return
+                print("Captain's Log manager does not support enter/activate.")
+                return 1
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception("Captain's Log manager enter failed: %s", exc)
+            print("Error: failed to enter Captain's Log; see logs for details.")
+            return 1
 
-    if sub == "call":
-        # args.agent_name and args.payload_json
-        name = args.agent_name
-        payload = {}
-        if args.payload_json:
-            try:
-                payload = json.loads(args.payload_json)
-            except Exception:
-                print("Invalid JSON payload. Provide valid JSON string.")
-                return
-
-        # If agent manager has call_agent or dispatch
-        if hasattr(am, "call"):
-            try:
-                res = am.call(name, payload)
-                pretty_print_object(res)
-                return
-            except Exception:
-                logger.exception("AgentManager.call failed")
-                show_trace()
-        if hasattr(am, "call_agent"):
-            try:
-                res = am.call_agent(name, payload)
-                pretty_print_object(res)
-                return
-            except Exception:
-                logger.exception("AgentManager.call_agent failed")
-                show_trace()
-
-        # Fallback: try dispatcher via intelligence.dispatcher.dispatcher.Dispatcher
-        disp = safe_import("intelligence.dispatcher.dispatcher", "Dispatcher")
-        if disp:
-            try:
-                d = disp()
-                res = d.dispatch({"agent": name, **payload})
-                pretty_print_object(res)
-                return
-            except Exception:
-                logger.exception("Dispatcher call failed")
-                show_trace()
-
-        print("Unable to call agent. Agent manager/dispatcher not found or does not expose call API.")
+    print("Captain's Log Master Root Mode: ACTIVE")
+    return 0
 
 
-def cmd_rag(args):
-    rag = get_rag_manager()
-    if not rag:
-        print("RAG manager not available. Ensure rag/rag_manager.py or core/rag_manager.py exists.")
-        return
+def cmd_cl_exit(args: argparse.Namespace) -> int:
+    runtime = _make_runtime()
+    logger.info("PrimusRuntime: exit Captain's Log requested.")
 
-    if args.rag_command == "ingest":
-        path = args.path
-        if not path:
-            print("Provide --path to directory containing documents.")
-            return
-        # try multiple call signatures
+    # Preferred: runtime method
+    if hasattr(runtime, "exit_captains_log"):
         try:
-            if hasattr(rag, "ingest_folder"):
-                res = rag.ingest_folder(path, chunk_size=args.chunk_size, overlap=args.overlap, model=args.model)
-                pretty_print_object(res)
-                return
-            if hasattr(rag, "ingest"):
-                res = rag.ingest(path)
-                pretty_print_object(res)
-                return
-            # fallback: call rag.ingest.py as script
-            script = SYSTEM_ROOT / "rag" / "ingest.py"
-            if script.exists():
-                os.system(f'python "{script}" --path "{path}"')
-                return
-            print("RAG ingest: no recognizable API found.")
-        except Exception:
-            logger.exception("RAG ingest failed")
-            show_trace()
-        return
-
-    if args.rag_command == "search":
-        q = args.query
-        if not q:
-            print("Provide --query")
-            return
-        try:
-            if hasattr(rag, "search"):
-                results = rag.search(q, top_k=args.top_k, model=args.model)
-                pretty_print_object(results)
-                return
-            # fallback to query.py CLI
-            query_script = SYSTEM_ROOT / "rag" / "query.py"
-            if query_script.exists():
-                os.system(f'python "{query_script}" --query "{q}" --model "{args.model}" --top-k {args.top_k}')
-                return
-            print("RAG search: no recognizable API found.")
-        except Exception:
-            logger.exception("RAG search failed")
-            show_trace()
-        return
-
-
-def cmd_chat(args):
-    """
-    Single-turn chat when a message is provided; otherwise fallback to REPL.
-    """
-    runtime, src = get_runtime()
-    if not runtime:
-        print("Runtime not available. Chat will be local echo only.")
-        print("Start runtime first or implement core/primus_runtime.PrimusRuntime")
-        return
-
-    if getattr(args, "message", None):
-        try:
-            reply = runtime.chat_once(args.message) if hasattr(runtime, "chat_once") else None
-            if reply is None:
-                print("Runtime does not expose chat_once(); no response available.")
-                return
-            print(f"User: {args.message}")
-            print(f"PRIMUS: {reply}")
-        except Exception as exc:
-            logger.exception("chat command failed")
-            print(f"Model backend error: {exc}")
-        return
-
-    # Fallback: interactive REPL using any available send method
-    send_fn = None
-    for name in ("chat_once", "send_message", "send", "handle_input", "ask", "query", "handle"):
-        if hasattr(runtime, name):
-            send_fn = getattr(runtime, name)
-            break
-
-    print("Entering chat REPL. Type '/exit' to quit, '/help' for commands.")
-    while True:
-        try:
-            text = input("You> ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\nExiting chat.")
-            break
-        if not text:
-            continue
-        if text.lower() in ("/exit", "/quit"):
-            break
-        if text.lower() == "/help":
-            print("Commands:\n  /exit, /quit - leave chat\n  /whoami - runtime info")
-            continue
-        if text.lower() == "/whoami":
-            print(f"Runtime source: {src}")
-            continue
-
-        if send_fn:
-            try:
-                res = send_fn(text)
-                print("PRIMUS>", res)
-            except Exception:
-                logger.exception("Chat send failed")
-                show_trace()
-                print("PRIMUS> (error)")
-        else:
-            print("PRIMUS>", "(no runtime send method available)")
-
-
-
-def cmd_subchats(args):
-    runtime, _ = get_runtime()
-    if not runtime:
-        print("Runtime not available. Ensure primus_runtime exists.")
-        return
-
-    if args.subchat_command == "list":
-        try:
-            subchats = runtime.list_subchats() if hasattr(runtime, "list_subchats") else []
-            if not subchats:
-                print("[no subchats]")
-            else:
-                for sid in subchats:
-                    print(f"- {sid}")
-        except Exception:
-            logger.exception("Failed to list subchats")
-            show_trace()
-        return
-
-    if args.subchat_command == "create":
-        owner = "user:local"
-        label = args.label
-        is_private = bool(args.private)
-        try:
-            if hasattr(runtime, "create_subchat"):
-                subchat_id = runtime.create_subchat(owner=owner, label=label, is_private=is_private)
-                print(f"Created subchat {subchat_id} (label='{label}', private={is_private})")
-                return
-        except Exception:
-            logger.exception("Failed to create subchat")
-            show_trace()
-            return
-        print("Runtime does not expose create_subchat().")
-
-
-
-def cmd_logs(args):
-    lf = LOG_FILE
-    if lf.exists():
-        print(f"--- Last 200 lines from {lf} ---")
-        with open(lf, "r", encoding="utf-8", errors="ignore") as f:
-            lines = f.readlines()[-200:]
-            print("".join(lines))
+            runtime.exit_captains_log()  # type: ignore[attr-defined]
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception("exit_captains_log() failed: %s", exc)
+            print("Error: failed to exit Captain's Log; see logs for details.")
+            return 1
     else:
-        print("No CLI log file found.")
+        # Fallback: direct manager call
+        try:
+            mgr = get_cl_manager()
+            if hasattr(mgr, "exit"):
+                mgr.exit()
+            elif hasattr(mgr, "deactivate"):
+                mgr.deactivate()
+            else:
+                print("Captain's Log manager does not support exit/deactivate.")
+                return 1
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.exception("Captain's Log manager exit failed: %s", exc)
+            print("Error: failed to exit Captain's Log; see logs for details.")
+            return 1
+
+    print("Captain's Log Master Root Mode: INACTIVE")
+    return 0
 
 
-
-def cmd_debug(args):
-    print("Debug info:")
-    cmd_status(args)
-    print("\nEnvironment PATH and PYTHONPATH (first 3 entries):")
-    print("PATH:", os.environ.get("PATH", "").split(os.pathsep)[:3])
-    print("PYTHONPATH:", os.environ.get("PYTHONPATH", "").split(os.pathsep)[:3])
+# ---------------------------------------------------------------------
+# Bootstrap / argument parsing
+# ---------------------------------------------------------------------
 
 
-def cmd_captains_log(args):
-    """Captain's Log Master Root Mode controls (Phase 1)."""
-
-    runtime, _ = get_runtime()
-    if not runtime:
-        print("Runtime not available. Ensure primus_runtime exists.")
-        return
-
-    sub = getattr(args, "cl_command", None)
-    if sub == "enter":
-        if hasattr(runtime, "enter_captains_log_mode"):
-            try:
-                runtime.enter_captains_log_mode()
-                print("Captain's Log Master Root Mode: ACTIVE")
-            except Exception:
-                logger.exception("Failed to enter Captain's Log mode")
-                show_trace()
-        else:
-            print("Runtime does not expose enter_captains_log_mode().")
-        return
-
-    if sub == "exit":
-        if hasattr(runtime, "exit_captains_log_mode"):
-            try:
-                runtime.exit_captains_log_mode()
-                print("Captain's Log Master Root Mode: INACTIVE")
-            except Exception:
-                logger.exception("Failed to exit Captain's Log mode")
-                show_trace()
-        else:
-            print("Runtime does not expose exit_captains_log_mode().")
-        return
-
-    if sub == "status":
-        manager = getattr(runtime, "captains_log_manager", None)
-        status = None
-        if manager and hasattr(manager, "get_status"):
-            try:
-                status = manager.get_status()
-            except Exception:
-                logger.exception("Failed to retrieve Captain's Log status")
-                show_trace()
-
-        if status is None:
-            status = {"status": "unavailable", "mode": "unknown"}
-
-        mode = status.get("mode", "unknown")
-        health = status.get("status", "unknown")
-        print(f"Captain's Log system : {health.upper()} (mode={mode})")
-        return
-
-    print("Unsupported Captain's Log command.")
-
-
-# -----------------------
-# CLI argument parsing
-# -----------------------
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="primus", description="PRIMUS OS CLI")
-    parser.add_argument(
-        "--log-level",
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help="Logging verbosity for CLI operations",
+    parser = argparse.ArgumentParser(
+        description="PRIMUS OS command-line interface",
     )
-    sub = parser.add_subparsers(dest="cmd", required=True)
-
-    # status
-    p_status = sub.add_parser("status", help="Show system status")
-    p_status.set_defaults(func=cmd_status)
-
-    # self-test
-    p_self = sub.add_parser("self-test", help="Run self-tests (boot/agents/checks)")
-    p_self.set_defaults(func=cmd_self_test)
-    p_self_alt = sub.add_parser("selftest", help="Run self-tests (boot/agents/checks)")
-    p_self_alt.set_defaults(func=cmd_self_test)
-
-    # start/stop
-    p_start = sub.add_parser("start", help="Start primus runtime")
-    p_start.set_defaults(func=cmd_start)
-    p_stop = sub.add_parser("stop", help="Stop primus runtime")
-    p_stop.set_defaults(func=cmd_stop)
-
-    # agent commands
-    p_agent = sub.add_parser("agent", help="Agent operations")
-    agent_sub = p_agent.add_subparsers(dest="agent_command", required=True)
-    agent_list = agent_sub.add_parser("list", help="List available agents")
-    agent_list.set_defaults(func=cmd_agent)
-    agent_call = agent_sub.add_parser("call", help="Call an agent with payload")
-    agent_call.add_argument("agent_name", type=str, help="Agent name (e.g. FileAgent)")
-    agent_call.add_argument("payload_json", type=str, nargs="?", default="{}", help='JSON payload string e.g. \'{"action":"ping"}\'')
-    agent_call.set_defaults(func=cmd_agent)
-
-    # RAG commands
-    p_rag = sub.add_parser("rag", help="RAG operations")
-    rag_sub = p_rag.add_subparsers(dest="rag_command", required=True)
-    rag_ingest = rag_sub.add_parser("ingest", help="Ingest documents into RAG")
-    rag_ingest.add_argument("--path", type=str, required=True, help="Path to documents")
-    rag_ingest.add_argument("--chunk-size", type=int, default=500)
-    rag_ingest.add_argument("--overlap", type=int, default=50)
-    rag_ingest.add_argument("--model", type=str, default="all-MiniLM-L6-v2")
-    rag_ingest.set_defaults(func=cmd_rag)
-
-    rag_search = rag_sub.add_parser("search", help="Search RAG index")
-    rag_search.add_argument("--query", type=str, required=True)
-    rag_search.add_argument("--top-k", type=int, default=5)
-    rag_search.add_argument("--model", type=str, default="all-MiniLM-L6-v2")
-    rag_search.set_defaults(func=cmd_rag)
-
-    # subchats
-    p_subchat = sub.add_parser("subchats", help="Subchat operations")
-    subchat_sub = p_subchat.add_subparsers(dest="subchat_command", required=True)
-    subchat_list = subchat_sub.add_parser("list", help="List subchats")
-    subchat_list.set_defaults(func=cmd_subchats)
-    subchat_create = subchat_sub.add_parser("create", help="Create a subchat")
-    subchat_create.add_argument("--label", required=True, help="Subchat label")
-    subchat_create.add_argument("--private", action="store_true", help="Mark subchat private")
-    subchat_create.set_defaults(func=cmd_subchats)
-
-    # Captain's Log controls
-    p_cl = sub.add_parser("cl", help="Captain's Log Master Root Mode controls")
-    cl_sub = p_cl.add_subparsers(dest="cl_command", required=True)
-    cl_enter = cl_sub.add_parser("enter", help="Enter Captain's Log Master Root Mode")
-    cl_enter.set_defaults(func=cmd_captains_log)
-    cl_exit = cl_sub.add_parser("exit", help="Exit Captain's Log Master Root Mode")
-    cl_exit.set_defaults(func=cmd_captains_log)
-    cl_status = cl_sub.add_parser("status", help="Show Captain's Log status")
-    cl_status.set_defaults(func=cmd_captains_log)
+    subparsers = parser.add_subparsers(dest="command", required=True)
 
     # chat
-    p_chat = sub.add_parser("chat", help="Single-turn chat or interactive REPL if no message is provided")
-    p_chat.add_argument("message", nargs="?", help="Optional single-turn message to send to PRIMUS")
-    p_chat.set_defaults(func=cmd_chat)
+    chat_p = subparsers.add_parser(
+        "chat",
+        help="Send a single message to PRIMUS and print the reply.",
+    )
+    chat_p.add_argument("message", help="User message to send to PRIMUS.")
+    chat_p.set_defaults(func=cmd_chat)
 
-    # logs
-    p_logs = sub.add_parser("logs", help="Show recent CLI logs")
-    p_logs.set_defaults(func=cmd_logs)
+    # captain's log group
+    cl_p = subparsers.add_parser(
+        "cl",
+        help="Captain's Log commands (status/enter/exit).",
+    )
+    cl_sub = cl_p.add_subparsers(dest="cl_command", required=True)
 
-    # debug
-    p_debug = sub.add_parser("debug", help="Developer debug info")
-    p_debug.set_defaults(func=cmd_debug)
+    cl_status_p = cl_sub.add_parser("status", help="Show Captain's Log status.")
+    cl_status_p.set_defaults(func=cmd_cl_status)
+
+    cl_enter_p = cl_sub.add_parser("enter", help="Enter Master Root Captain's Log mode.")
+    cl_enter_p.set_defaults(func=cmd_cl_enter)
+
+    cl_exit_p = cl_sub.add_parser("exit", help="Exit Master Root Captain's Log mode.")
+    cl_exit_p.set_defaults(func=cmd_cl_exit)
 
     return parser
 
 
-# -----------------------
-# Main
-# -----------------------
-def main():
+def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
-    args = parser.parse_args()
-    set_log_level(getattr(args, "log_level", "INFO"))
-    try:
-        if hasattr(args, "func"):
-            args.func(args)
-        else:
-            parser.print_help()
-    except Exception:
-        logger.exception("Unhandled exception in primus_cli main")
-        show_trace()
+    args = parser.parse_args(argv)
+
+    func = getattr(args, "func", None)
+    if func is None:
+        parser.print_help()
+        return 1
+
+    return int(func(args))
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
+
+
+
+
+
+
