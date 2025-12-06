@@ -1,4 +1,3 @@
-# core/primus_runtime.py
 #!/usr/bin/env python3
 """
 core/primus_runtime.py
@@ -28,20 +27,13 @@ from typing import Any, Dict, Optional
 # Path setup
 # ---------------------------------------------------------------------------
 
-SYSTEM_ROOT = Path(__file__).resolve().parents[1]  # .../System
+# This file lives at .../System/core/primus_runtime.py
+SYSTEM_ROOT = Path(__file__).resolve().parent.parent  # .../System
 PROJECT_ROOT = SYSTEM_ROOT.parent
 
 for p in (str(SYSTEM_ROOT), str(PROJECT_ROOT)):
     if p not in sys.path:
         sys.path.insert(0, p)
-
-SYSTEM_DIR = SYSTEM_ROOT / "System"
-if SYSTEM_DIR.exists() and str(SYSTEM_DIR) not in sys.path:
-    sys.path.insert(0, str(SYSTEM_DIR))
-
-SYSTEM_DIR = SYSTEM_ROOT / "System"
-if SYSTEM_DIR.exists() and str(SYSTEM_DIR) not in sys.path:
-    sys.path.insert(0, str(SYSTEM_DIR))
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -63,7 +55,7 @@ logging.basicConfig(
 logger = logging.getLogger("primus_runtime")
 
 # ---------------------------------------------------------------------------
-# Optional imports (security, captain’s log, etc.)
+# Optional imports (PrimusCore, security, captain’s log)
 # ---------------------------------------------------------------------------
 
 # PrimusCore (required for core system)
@@ -74,34 +66,6 @@ except Exception as exc:  # noqa: BLE001
     logger.warning("PrimusCore import failed in primus_runtime: %s", exc)
 
 # Security layer (optional)
-try:
-    from captains_log.cl_manager import CaptainsLogManager, get_manager as get_captains_log_manager
-except Exception:
-    CaptainsLogManager = None
-    get_captains_log_manager = None
-    logger.warning("captains_log.cl_manager not available; Captain's Log manager unavailable.")
-
-try:
-    from core.security_gate import SecurityGate, get_security_gate
-except Exception:
-    SecurityGate = None
-    get_security_gate = None
-    logger.warning("core.security_gate not available; SecurityGate unavailable.")
-
-try:
-    from captains_log.cl_manager import CaptainsLogManager, get_manager as get_captains_log_manager
-except Exception:
-    CaptainsLogManager = None
-    get_captains_log_manager = None
-    logger.warning("captains_log.cl_manager not available; Captain's Log manager unavailable.")
-
-try:
-    from core.security_gate import SecurityGate, get_security_gate
-except Exception:
-    SecurityGate = None
-    get_security_gate = None
-    logger.warning("core.security_gate not available; SecurityGate unavailable.")
-
 try:
     from security.security_layer import get_security_layer
 except Exception:
@@ -117,15 +81,17 @@ except Exception:
 
 # Captain's Log manager (optional)
 try:
-    from captains_log.cl_manager import get_manager as get_captains_log_manager
+    from captains_log.cl_manager import CaptainsLogManager, get_manager as get_captains_log_manager
 except Exception:
+    CaptainsLogManager = None
     get_captains_log_manager = None
     logger.info("captains_log.cl_manager not available; Captain's Log checks disabled.")
 
 # Security Gate (optional)
 try:
-    from core.security_gate import get_security_gate
+    from core.security_gate import SecurityGate, get_security_gate
 except Exception:
+    SecurityGate = None
     get_security_gate = None
     logger.info("core.security_gate not available; external network gate checks disabled.")
 
@@ -305,13 +271,14 @@ class PrimusRuntime:
         if core is not None:
             # --- RAG / embedder ------------------------------------------------
             try:
-                embedder = getattr(core, "embedder", None)
+                # NOTE: PrimusCore now exposes rag_embedder instead of 'embedder'
+                embedder = getattr(core, "rag_embedder", None)
                 if embedder is not None:
                     print("RAG embedder : WORKING")
                     logger.info("Bootup Test - RAG embedder present.")
                 else:
                     print("RAG embedder : MISSING")
-                    logger.warning("Bootup Test - RAG embedder missing.")
+                    logger.warning("Bootup Test - RAG embedder missing (rag_embedder is None).")
             except Exception as exc:  # noqa: BLE001
                 print(f"RAG embedder : FAILED ({exc})")
                 logger.exception("Bootup Test - RAG embedder check failed: %s", exc)

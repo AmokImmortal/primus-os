@@ -1,4 +1,5 @@
-import os
+# rag/indexer.py
+
 import json
 from pathlib import Path
 from rag.embedder import RAGEmbedder
@@ -25,16 +26,17 @@ class RAGIndexer:
     def _gather_files(self, path: Path, recursive: bool):
         if path.is_file():
             return [path]
+
         if not recursive:
             return [p for p in path.iterdir() if p.is_file()]
+
         return [p for p in path.rglob("*") if p.is_file()]
 
-    def index_path(self, path: str, recursive: bool = False):
+    def index_path(self, name: str, path: str, recursive: bool = False):
         root = Path(path)
         files = self._gather_files(root, recursive=recursive)
 
-        index_name = root.name
-        index_data = self._load_index(index_name)
+        index_data = self._load_index(name)
 
         for f in files:
             try:
@@ -42,9 +44,9 @@ class RAGIndexer:
             except Exception:
                 continue
 
-            vec = self.embedder.embed(text)
+            vec = self.embedder.embed_text(text)
 
             index_data["documents"].append({"path": str(f), "text": text})
             index_data["vectors"].append(vec)
 
-        self._save_index(index_name, index_data)
+        self._save_index(name, index_data)

@@ -1,11 +1,12 @@
-import os
+# rag/retriever.py
+
 import json
 import math
 from pathlib import Path
 from rag.embedder import RAGEmbedder
 
 
-class RAGReteriever:
+class RAGRetriever:
     def __init__(self, index_root: str = "rag_index"):
         self.index_root = Path(index_root)
         self.index_root.mkdir(parents=True, exist_ok=True)
@@ -31,9 +32,9 @@ class RAGReteriever:
         if not data:
             return []
 
-        qvec = self.embedder.embed(query)
-        scored = []
+        qvec = self.embedder.embed_text(query)
 
+        scored = []
         for doc, vec in zip(data["documents"], data["vectors"]):
             score = self._cosine(qvec, vec)
             scored.append((score, doc))
