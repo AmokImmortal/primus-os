@@ -1,145 +1,154 @@
-# embedder.py
+# rag/embedder.py
+#!/usr/bin/env python3
 """
-PRIMUS RAG embedder
-- Provides Embedder class and get_embedder(model_name) helper.
-- Uses sentence-transformers and PyTorch; auto-detects CUDA if available.
-- Returns numpy float32 vectors suitable for FAISS.
-Location: C:\P.R.I.M.U.S OS\System\rag\embedder.py
+Lightweight RAG embedding backend for PRIMUS OS.
+
+This module is intentionally simple and offline-friendly:
+
+- Provides a tiny RAGManager wrapper used by PrimusCore.
+- Uses a trivial hash-based "embedding" so that:
+    * The code runs without external dependencies.
+    * The RAG self-test can verify the pipeline end-to-end.
+- Can be replaced later with a real embedding backend (e.g. sentence-transformers,
+  OpenAI embeddings, etc.) without changing the PrimusCore interface.
 """
 
-import os
-import math
-from typing import List, Optional
+from __future__ import annotations
 
-import numpy as np
-
-# Lazy import SentenceTransformer to allow graceful failure if not installed
-try:
-    from sentence_transformers import SentenceTransformer
-except Exception as e:
-    SentenceTransformer = None  # ingest/query will still handle this case
+import hashlib
+import json
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Tuple
 
 
-def _detect_device() -> str:
+class RAGManager:
     """
-    Decide whether to use 'cuda' or 'cpu'.
-    You can override by setting environment variable PRIMUS_EMBED_DEVICE.
-    """
-    env = os.environ.get("PRIMUS_EMBED_DEVICE", "").lower()
-    if env in ("cpu", "cuda"):
-        return env
-    # auto-detect
-    try:
-        import torch
-        return "cuda" if torch.cuda.is_available() else "cpu"
-    except Exception:
-        return "cpu"
-
-
-class Embedder:
-    """
-    Wraps a SentenceTransformer model with batching & device handling.
-    embed(texts: List[str]) -> np.ndarray shape (N, dim) dtype float32
+    Minimal RAG manager that:
+      - Stores a tiny local "index" as JSON in <system_root>/rag/index.jsonl
+      - Exposes a very small self_test() API used by PrimusCore.run_self_test()
+      - Provides basic add_documents() and search() hooks for future expansion.
     """
 
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2", device: Optional[str] = None, batch_size: int = 128):
-        if SentenceTransformer is None:
-            raise RuntimeError("sentence-transformers is not installed. Install with: pip install sentence-transformers")
+    def __init__(self, system_root: Path | str):
+        self.system_root = Path(system_root)
+        self.rag_dir = self.system_root / "rag"
+        self.rag_dir.mkdir(parents=True, exist_ok=True)
 
-        self.model_name = model_name
-        self.device = device or _detect_device()
-        self.batch_size = max(1, int(batch_size))
+        self.index_path = self.rag_dir / "index.jsonl"
 
-        # Load model
-        # SentenceTransformer moves model to device in __init__ when calling .to()
-        print(f"[Embedder] Loading model: {self.model_name}")
-        try:
-            # instantiate model
-            self.model = SentenceTransformer(self.model_name)
-            # attempt to move to desired device
-            try:
-                # This .to() call can be needed depending on sentence-transformers version
-                self.model.to(self.device)
-            except Exception:
-                # Some versions already moved; ignore if fails
-                pass
-        except Exception as e:
-            raise RuntimeError(f"[Embedder] Failed to load model '{self.model_name}': {e}")
+    # -----------------------------------------------------
+    # Internal helpers
+    # -----------------------------------------------------
 
-        # determine embedding dimension by encoding an empty string
-        try:
-            dummy = self.model.encode([""], convert_to_numpy=True)
-            self.dim = int(dummy.shape[1])
-        except Exception:
-            # fallback
-            self.dim = None
-
-        print(f"[Embedder] Device: {self.device}; Batch size: {self.batch_size}; Dim: {self.dim}")
-
-    def embed(self, texts: List[str]) -> np.ndarray:
+    def _hash_text(self, text: str) -> List[float]:
         """
-        Embed a list of texts — returns numpy array shape (N, dim) dtype float32
-        Batches automatically to avoid OOM.
+        Extremely simple "embedding": SHA256 -> list of floats in [0, 1].
+
+        This is NOT semantically meaningful; it's only here so that the
+        pipeline has something to operate on without external libraries.
         """
-        if not isinstance(texts, list):
-            raise ValueError("texts must be a list of strings")
+        h = hashlib.sha256(text.encode("utf-8")).digest()
+        # Take first 16 bytes and normalize to [0, 1]
+        return [b / 255.0 for b in h[:16]]
 
-        n = len(texts)
-        if n == 0:
-            return np.zeros((0, self.dim if self.dim else 0), dtype=np.float32)
+    def _add_to_index(self, doc_id: str, text: str, meta: Dict[str, Any]) -> None:
+        embedding = self._hash_text(text)
+        record = {
+            "id": doc_id,
+            "text": text,
+            "embedding": embedding,
+            "meta": meta,
+        }
+        with self.index_path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
 
-        # guard: convert non-str to str
-        texts = [t if isinstance(t, str) else str(t) for t in texts]
+    def _iter_index(self) -> Iterable[Dict[str, Any]]:
+        if not self.index_path.exists():
+            return []
+        with self.index_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    yield json.loads(line)
+                except Exception:
+                    continue
 
-        # compute batch count
-        batch_size = self.batch_size
-        batches = math.ceil(n / batch_size)
-        out = []
+    # -----------------------------------------------------
+    # Public API
+    # -----------------------------------------------------
 
-        for i in range(batches):
-            start = i * batch_size
-            end = min((i + 1) * batch_size, n)
-            batch_texts = texts[start:end]
-            try:
-                emb = self.model.encode(batch_texts, convert_to_numpy=True, show_progress_bar=False)
-            except TypeError:
-                # older/newer API differences: try without convert_to_numpy
-                emb = self.model.encode(batch_texts, show_progress_bar=False)
-                # if returned list, convert
-                if not isinstance(emb, np.ndarray):
-                    emb = np.asarray(emb)
+    def add_documents(
+        self,
+        docs: Iterable[Tuple[str, str]],
+        meta: Dict[str, Any] | None = None,
+    ) -> int:
+        """
+        Add (id, text) documents to the index.
 
-            # Ensure dtype float32
-            emb = np.asarray(emb, dtype=np.float32)
-            out.append(emb)
+        Returns the number of documents successfully added.
+        """
+        meta = meta or {}
+        count = 0
+        for doc_id, text in docs:
+            self._add_to_index(doc_id, text, meta)
+            count += 1
+        return count
 
-        result = np.vstack(out).astype(np.float32)
+    def embed_text(self, text: str) -> List[float]:
+        """Return a deterministic numeric embedding for a single text string."""
+        return self._hash_text(text)
 
-        # If we couldn't infer dim earlier, set it now
-        if self.dim is None and result.ndim == 2:
-            self.dim = result.shape[1]
+    def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
+        """
+        Extremely naive "similarity" search:
+          - Embed the query.
+          - Compute L1 distance from each stored embedding.
+          - Return the closest top_k items.
+        """
+        q_emb = self._hash_text(query)
+        results: List[Tuple[float, Dict[str, Any]]] = []
 
+        for rec in self._iter_index():
+            emb = rec.get("embedding")
+            if not isinstance(emb, list):
+                continue
+            # L1 distance between embeddings
+            dist = sum(abs((float(a) if a is not None else 0.0) - float(b)) for a, b in zip(q_emb, emb))
+            results.append((dist, rec))
+
+        results.sort(key=lambda x: x[0])
+        return [r[1] for r in results[:top_k]]
+
+    # -----------------------------------------------------
+    # Self-test used by PrimusCore
+    # -----------------------------------------------------
+
+    def self_test(self) -> Dict[str, Any]:
+        """
+        Very small self-test used by PrimusCore.run_self_test().
+
+        Verifies that:
+          - The rag directory is writable.
+          - We can add a document to the index.
+          - We can perform a trivial search over that index.
+        """
+        result: Dict[str, Any] = {"status": "ok"}
+        try:
+            # Ensure directory exists and is writable
+            self.rag_dir.mkdir(parents=True, exist_ok=True)
+
+            # Add a test document
+            test_id = "selftest-doc"
+            test_text = "This is a small RAG self-test document for PRIMUS OS."
+            self._add_to_index(test_id, test_text, {"source": "selftest"})
+
+            # Perform a tiny search
+            hits = self.search("RAG self-test", top_k=1)
+            result["hits_found"] = len(hits)
+            result["index_path"] = str(self.index_path)
+        except Exception as exc:
+            result["status"] = "error"
+            result["error"] = str(exc)
         return result
-
-    @property
-    def using_gpu(self) -> bool:
-        return self.device.startswith("cuda")
-
-
-# Helper factory used by ingest.py and query.py
-def get_embedder(model_name: str = "all-MiniLM-L6-v2", device: Optional[str] = None, batch_size: int = 128) -> Embedder:
-    """
-    Returns an Embedder instance. Kept as a helper for the scripts.
-    """
-    return Embedder(model_name=model_name, device=device, batch_size=batch_size)
-
-
-# Simple CLI test (optional)
-if __name__ == "__main__":
-    # quick smoke test when executed directly
-    model = os.environ.get("PRIMUS_TEST_MODEL", "all-MiniLM-L6-v2")
-    e = get_embedder(model)
-    print("[Embedder] Ready. Device:", e.device, "Dim:", e.dim)
-    sample = ["Hello world", "This is a test"]
-    vecs = e.embed(sample)
-    print("[Embedder] Embedded", vecs.shape)

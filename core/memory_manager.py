@@ -1,51 +1,63 @@
 # core/memory_manager.py
 
-"""
-Compatibility shim for PRIMUS OS memory management.
-
-Historically the project imported:
-
-    from core.memory_manager import MemoryManager
-
-but the concrete implementation now lives in core/memory.py.
-
-This module provides:
-    - MemoryManager: a direct alias of the implementation class
-    - get_memory_manager(): a simple singleton-style accessor
-"""
-
 from __future__ import annotations
 
+"""
+core/memory_manager.py
+
+Thin wrapper + singleton accessor around the JSON-based MemoryManager
+implemented in core.memory.
+
+This module exists so other parts of PRIMUS can do:
+
+    from core.memory_manager import MemoryManager, get_memory_manager
+
+without worrying about the underlying implementation details.
+"""
+
+import logging
 from pathlib import Path
 from typing import Optional
 
-from .memory import MemoryManager as _MemoryManagerImpl
+from core.memory import MemoryManager as _BaseMemoryManager
+
+logger = logging.getLogger("core.memory_manager")
+
+# Singleton instance
+_MEMORY_MANAGER: Optional["MemoryManager"] = None
 
 
-class MemoryManager(_MemoryManagerImpl):
+class MemoryManager(_BaseMemoryManager):
     """
-    Thin subclass alias so existing imports of
-    `core.memory_manager.MemoryManager` continue to work.
+    PRIMUS-level MemoryManager.
+
+    Currently this just subclasses the JSON-based MemoryManager from core.memory
+    and normalizes the memory_root to live under the System/memory folder.
     """
-    pass
+
+    def __init__(self, memory_root: Path | str):
+        root = Path(memory_root)
+        super().__init__(str(root))
 
 
-_memory_manager_singleton: Optional[MemoryManager] = None
-
-
-def get_memory_manager(memory_root: Optional[str] = None) -> MemoryManager:
+def get_memory_manager(system_root: Optional[Path] = None) -> MemoryManager:
     """
-    Return a process-wide singleton MemoryManager.
+    Return a process-wide singleton MemoryManager instance.
 
-    If memory_root is not provided, default to `<System root>/memory`.
+    - If system_root is not provided, it defaults to the parent directory of core/.
+    - Memory directory is System/memory by default.
     """
-    global _memory_manager_singleton
+    global _MEMORY_MANAGER
 
-    if _memory_manager_singleton is None:
-        if memory_root is None:
-            system_root = Path(__file__).resolve().parents[1]
-            memory_root = str(system_root / "memory")
+    if _MEMORY_MANAGER is not None:
+        return _MEMORY_MANAGER
 
-        _memory_manager_singleton = MemoryManager(memory_root=memory_root)
+    if system_root is None:
+        # .../System/core/memory_manager.py -> .../System
+        system_root = Path(__file__).resolve().parents[1]
 
-    return _memory_manager_singleton
+    memory_root = system_root / "memory"
+    logger.info("Initializing MemoryManager with root=%s", memory_root)
+
+    _MEMORY_MANAGER = MemoryManager(memory_root)
+    return _MEMORY_MANAGER

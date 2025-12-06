@@ -1,8 +1,16 @@
 # core/model_manager.py
 """
-PRIMUS OS - Model Manager
-Handles loading and running local GGUF models (llama.cpp backend).
-Designed for LM Studio–compatible GGUF models.
+ModelManager for PRIMUS OS.
+
+- Wraps a local llama.cpp backend (llama-cpp-python).
+- Resolves model_path from:
+    1) Explicit model_path argument, or
+    2) configs/model_config.json -> {"model_path": "..."}
+- Provides:
+    - generate(prompt)  -> text
+    - is_available()    -> bool
+    - get_backend_status() -> (ok: bool, message: str)
+    - list_models()     -> list of known model paths (for diagnostics)
 """
 
 from __future__ import annotations
@@ -10,162 +18,243 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
+try:
+    from llama_cpp import Llama
+except Exception:  # noqa: BLE001
+    Llama = None  # type: ignore[assignment]
 
-class LlamaCppBackend:
-    """Minimal llama.cpp backend wrapper (local/offline only)."""
-
-    def __init__(self, config: Dict[str, Any], logger: Optional[logging.Logger] = None):
-        self._logger = logger or logging.getLogger("model_manager")
-        self._llama = None
-        self._available = False
-        self._config = config
-        self._init_error: Optional[str] = None
-
-        try:
-            from llama_cpp import Llama
-        except Exception as exc:  # ImportError or runtime errors
-            self._init_error = f"llama_cpp import failed: {exc}"
-            self._logger.error(self._init_error)
-            return
-
-        model_path = Path(config.get("model_path", "")).expanduser()
-        if not model_path.is_absolute():
-            model_path = model_path.resolve()
-
-        if not model_path.exists():
-            self._init_error = f"Model file not found at {model_path}"
-            self._logger.error(self._init_error)
-            return
-
-        try:
-            self._llama = Llama(
-                model_path=str(model_path),
-                n_ctx=int(config.get("n_ctx", 4096)),
-                n_threads=int(config.get("n_threads", 4)),
-                temperature=float(config.get("temperature", 0.7)),
-                top_p=float(config.get("top_p", 0.9)),
-                verbose=False,
-            )
-            self._available = True
-            self._logger.info("LlamaCpp backend initialized with model %s", model_path)
-        except Exception as exc:
-            self._init_error = f"Failed to load model: {exc}"
-            self._logger.error(self._init_error)
-
-    def is_available(self) -> bool:
-        return self._available and self._llama is not None
-
-    def generate(self, prompt: str, **kwargs) -> str:
-        if not self.is_available():
-            raise RuntimeError(self._init_error or "Model backend unavailable")
-
-        max_tokens = kwargs.get("max_tokens", 128)
-        temperature = kwargs.get("temperature", self._config.get("temperature", 0.7))
-        top_p = kwargs.get("top_p", self._config.get("top_p", 0.9))
-        stop = kwargs.get("stop")
-
-        output = self._llama(
-            prompt,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            top_p=top_p,
-            stop=stop,
-        )
-        try:
-            return output["choices"][0]["text"]
-        except Exception as exc:
-            raise RuntimeError(f"Unexpected model output: {exc}")
-
-    def status(self) -> Tuple[bool, str]:
-        if self.is_available():
-            return True, "Model loaded"
-        return False, self._init_error or "Model backend unavailable"
+logger = logging.getLogger("model_manager")
 
 
 class ModelManager:
-    def __init__(self, system_root: Optional[str] = None, config_path: Optional[str] = None):
-        self.system_root = Path(system_root) if system_root else Path(__file__).resolve().parents[1]
-        default_config = self.system_root / "configs" / "model_config.json"
-        self.config_path = Path(config_path) if config_path else default_config
-        self.config_path.parent.mkdir(parents=True, exist_ok=True)
+    """
+    Thin wrapper around a single local llama.cpp model.
 
-        self.logger = logging.getLogger("model_manager")
-        if not self.logger.handlers:
-            handler = logging.StreamHandler()
-            handler.setFormatter(logging.Formatter("%(asctime)s [model_manager] %(levelname)s: %(message)s"))
-            self.logger.addHandler(handler)
-        self.logger.setLevel(logging.INFO)
+    This is intentionally simple for PRIMUS v1:
+    - Single GGUF model on disk.
+    - Synchronous text completion via llama-cpp-python.
+    """
 
-        self.config = self._load_or_create_config()
-        self.backend = self._build_backend(self.config)
+    def __init__(
+        self,
+        model_path: Optional[str] = None,
+        system_root: Optional[Path] = None,
+        max_context_tokens: int = 4096,
+    ) -> None:
+        """
+        Initialize the model manager.
 
-    # -----------------------------------------------------------
-    # Config management
-    # -----------------------------------------------------------
-    def _load_or_create_config(self) -> Dict[str, Any]:
-        if not self.config_path.exists():
-            default = {
-                "backend": "llama_cpp",
-                "model_path": "C:\\Users\\amoki\\Desktop\\AI files\\models\\DarkIdol-Llama-3.1-8B-Instruct-1.3-Uncensored_Q4_K_M.gguf",
-                "n_ctx": 4096,
-                "n_threads": 8,
-                "temperature": 0.7,
-                "top_p": 0.9,
-            }
-            self.config_path.write_text(json.dumps(default, indent=2), encoding="utf-8")
-            return default
+        :param model_path: Optional explicit path to the GGUF model file.
+        :param system_root: Optional System/ root; used to locate configs/.
+        :param max_context_tokens: Context window for llama.cpp.
+        """
+        self.system_root = system_root or Path(__file__).resolve().parents[1]
+        self.configs_dir = self.system_root / "configs"
+        self.model_path: Optional[Path] = None
+        self.max_context_tokens = max_context_tokens
+
+        self._llm: Optional[Llama] = None  # type: ignore[assignment]
+
+        # Resolve model path from explicit argument or config
+        resolved_path = self._resolve_model_path(model_path)
+        if resolved_path is None:
+            logger.error(
+                "ModelManager could not resolve a valid model path; "
+                "backend will be unavailable."
+            )
+            return
+
+        self.model_path = resolved_path
+
+        # Try to initialize llama.cpp backend
+        self._initialize_backend()
+
+    # ------------------------------------------------------------------
+    # Path / config helpers
+    # ------------------------------------------------------------------
+
+    def _resolve_model_path(self, explicit_path: Optional[str]) -> Optional[Path]:
+        """Resolve the model path from explicit arg or configs/model_config.json."""
+        if explicit_path:
+            path = Path(explicit_path).expanduser()
+            if path.is_file():
+                return path
+            logger.error("Explicit model_path does not exist: %s", path)
+            return None
+
+        # Fall back to configs/model_config.json
+        cfg_path = self.configs_dir / "model_config.json"
+        if not cfg_path.is_file():
+            logger.error(
+                "No model_path provided and %s does not exist; "
+                "please create configs/model_config.json with a 'model_path' key.",
+                cfg_path,
+            )
+            return None
 
         try:
-            return json.loads(self.config_path.read_text(encoding="utf-8"))
-        except Exception:
-            # fallback to minimal default if file is corrupted
-            default = {
-                "backend": "llama_cpp",
-                "model_path": "",
-            }
-            self.config_path.write_text(json.dumps(default, indent=2), encoding="utf-8")
-            return default
+            with cfg_path.open("r", encoding="utf-8") as f:
+                cfg = json.load(f)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Failed to read %s: %s", cfg_path, exc)
+            return None
 
-    def _build_backend(self, config: Dict[str, Any]):
-        backend_name = config.get("backend", "llama_cpp")
-        if backend_name == "llama_cpp":
-            return LlamaCppBackend(config, logger=self.logger)
-        self.logger.error("Unsupported backend: %s", backend_name)
-        return None
+        mp = cfg.get("model_path")
+        if not mp:
+            logger.error(
+                "configs/model_config.json is missing 'model_path' key: %s",
+                cfg_path,
+            )
+            return None
 
-    # -----------------------------------------------------------
-    # Public API
-    # -----------------------------------------------------------
+        path = Path(mp).expanduser()
+        if not path.is_file():
+            logger.error(
+                "Model path from config does not exist: %s (config=%s)",
+                path,
+                cfg_path,
+            )
+            return None
+
+        return path
+
+    # ------------------------------------------------------------------
+    # Backend initialization
+    # ------------------------------------------------------------------
+
+    def _initialize_backend(self) -> None:
+        """
+        Initialize the llama.cpp backend if possible.
+
+        If llama_cpp is not installed or the model path is invalid, the backend
+        remains unavailable but ModelManager stays importable.
+        """
+        if self.model_path is None:
+            logger.warning("Cannot initialize backend: model_path is None.")
+            return
+
+        if Llama is None:
+            logger.warning(
+                "llama_cpp is not available; install 'llama-cpp-python' in this venv."
+            )
+            return
+
+        try:
+            self._llm = Llama(
+                model_path=str(self.model_path),
+                n_ctx=self.max_context_tokens,
+                logits_all=False,
+                embedding=False,
+            )
+            logger.info(
+                "LlamaCpp backend initialized with model %s",
+                self.model_path,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Failed to initialize LlamaCpp backend: %s", exc)
+            self._llm = None
+
+    # ------------------------------------------------------------------
+    # Public API used by PrimusCore / runtime
+    # ------------------------------------------------------------------
+
     def is_available(self) -> bool:
-        return bool(self.backend and self.backend.is_available())
+        """Return True if a llama.cpp backend is ready."""
+        return self._llm is not None and self.model_path is not None
 
-    def model_status_check(self) -> Tuple[bool, str]:
-        if not self.backend:
-            return False, "No backend configured"
+    def generate(
+        self,
+        prompt: str,
+        max_tokens: int = 256,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+        stop: Optional[List[str]] = None,
+    ) -> str:
+        """
+        Generate a completion from the local model.
+
+        This is a simple text-completion interface, not full chat formatting.
+        """
+        if not self.is_available():
+            raise RuntimeError("Model backend is not available; cannot generate text.")
+
+        stop = stop or ["User:", "Assistant:"]
+        assert self._llm is not None  # for type checkers
+
+        logger.debug(
+            "ModelManager.generate called (len(prompt)=%d, max_tokens=%d)",
+            len(prompt),
+            max_tokens,
+        )
+
         try:
-            ok, message = self.backend.status()
-        except Exception as exc:
-            return False, f"Status check failed: {exc}"
+            result: Dict[str, Any] = self._llm(
+                prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                top_p=top_p,
+                stop=stop,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Error during llama.cpp generation: %s", exc)
+            raise
 
-        if not ok:
-            return False, message
-
-        # optional lightweight generation sanity check
+        # Newer llama_cpp returns a dict with 'choices'
+        text = ""
         try:
-            _ = self.backend.generate("ping", max_tokens=1)
-        except Exception as exc:
-            return False, f"Generation failed: {exc}"
-        return True, "Model backend available"
+            choices = result.get("choices") or []
+            if choices:
+                text = choices[0].get("text", "")
+        except Exception:  # noqa: BLE001
+            # Fallback: some versions may behave slightly differently
+            logger.warning("Unexpected llama_cpp response format: %r", result)
 
-    def generate(self, prompt: str, **kwargs) -> str:
-        if not self.backend:
-            raise RuntimeError("Model backend not configured")
-        return self.backend.generate(prompt, **kwargs)
+        return text.strip()
 
-    def list_models(self) -> list:
-        return [self.config.get("model_path", "")] if self.config else []
+    def get_backend_status(self) -> Tuple[bool, str]:
+        """
+        Return a (ok, message) tuple for bootup tests.
+
+        PrimusCore's model_status_check uses this if present.
+        """
+        if self.model_path is None:
+            return False, "No model_path resolved."
+
+        if self._llm is None:
+            return False, f"llama_cpp backend not initialized for {self.model_path}"
+
+        return True, f"llama.cpp model loaded from {self.model_path}"
+
+    def list_models(self) -> List[str]:
+        """
+        Return a list of known/active model paths for diagnostics.
+
+        For now, this is just the single active model if any.
+        """
+        if self.model_path is None:
+            return []
+        return [str(self.model_path)]
 
 
-__all__ = ["ModelManager", "LlamaCppBackend"]
+# Convenience accessor (mirrors style of other managers)
+_singleton_model_manager: Optional[ModelManager] = None
+
+
+def get_model_manager(
+    model_path: Optional[str] = None,
+    system_root: Optional[Path] = None,
+) -> ModelManager:
+    """
+    Return a singleton ModelManager instance.
+
+    PrimusCore may call this or instantiate ModelManager directly.
+    """
+    global _singleton_model_manager
+    if _singleton_model_manager is None:
+        _singleton_model_manager = ModelManager(
+            model_path=model_path,
+            system_root=system_root,
+        )
+    return _singleton_model_manager
