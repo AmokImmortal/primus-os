@@ -18,188 +18,125 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import math
 from dataclasses import dataclass
-from typing import Iterable, List, Dict, Any, Optional, Sequence
+from typing import Iterable, List, Sequence
 
 logger = logging.getLogger(__name__)
 
-
-# -----------------------------------------------------------------------------
-# Configuration & data structures
-# -----------------------------------------------------------------------------
-
-DEFAULT_EMBED_DIM = 384  # Safe, typical dimensionality for many text embedders
+# Public constants
+EMBED_DIM: int = 384
+DEFAULT_BACKEND: str = "hash-mock"
 
 
-@dataclass
+@dataclass(frozen=True)
 class EmbedderConfig:
-    """Configuration for the local embedder backend."""
+    """Configuration for the RAG embedder backend."""
+    backend: str = DEFAULT_BACKEND
+    dim: int = EMBED_DIM
 
-    dim: int = DEFAULT_EMBED_DIM
-    backend_name: str = "hash-mock"  # descriptive label for self-test / logs
 
-
-class SimpleHashEmbedder:
+class RAGEmbedder:
     """
-    Deterministic, stateless hash-based embedder.
+    Simple, deterministic mock embedder used for bootstrapping and testing.
 
-    This is a stand-in backend that maps text to a pseudo-random but
-    deterministic vector, using SHA-256 under the hood. It is *not* a semantic
-    embedding model, but it gives upstream code something vector-shaped to work
-    with so the RAG pipeline can be developed and tested.
-
-    You can later replace this with a real model (e.g. sentence-transformers)
-    by:
-      - Adding a new backend class.
-      - Updating `_create_embedder_from_config()` to instantiate it.
+    This does NOT produce semantically meaningful vectors; it just turns text
+    into a stable numeric vector so the rest of the RAG stack can be developed.
     """
+    def __init__(self, config: EmbedderConfig | None = None) -> None:
+        self._config = config or EmbedderConfig()
+        logger.info(
+            "Initializing RAG embedder backend %r (dim=%d)",
+            self._config.backend,
+            self._config.dim,
+        )
 
-    def __init__(self, config: EmbedderConfig) -> None:
-        self.config = config
-        self.dim = config.dim
-        self.backend_name = config.backend_name
+    @property
+    def backend(self) -> str:
+        return self._config.backend
 
-    # ------------------------------------------------------------------ #
-    # Core embedding methods
-    # ------------------------------------------------------------------ #
+    @property
+    def dim(self) -> int:
+        return self._config.dim
 
-    def embed(self, text: str, *, normalize: bool = True) -> List[float]:
-        """Embed a single text string into a vector of length `self.dim`."""
-        if not isinstance(text, str):
-            raise TypeError(f"text must be str, got {type(text)!r}")
+    # ---- Public embedding API -------------------------------------------------
 
-        # Normalize whitespace for determinism
-        normalized = " ".join(text.split())
-        digest = hashlib.sha256(normalized.encode("utf-8")).digest()
+    def embed_text(self, text: str) -> List[float]:
+        """Embed a single text string into a fixed-size vector."""
+        return _hash_embed(text, self._config.dim)
 
-        # Expand digest to required length by repeated hashing
-        raw_bytes = bytearray()
-        counter = 0
-        while len(raw_bytes) < self.dim * 4:
-            counter_bytes = counter.to_bytes(4, "little", signed=False)
-            raw_bytes.extend(hashlib.sha256(digest + counter_bytes).digest())
-            counter += 1
-
-        # Convert bytes to floats in [-1, 1]
-        values: List[float] = []
-        for i in range(self.dim):
-            chunk = raw_bytes[i * 4 : (i + 1) * 4]
-            int_val = int.from_bytes(chunk, "little", signed=False)
-            # Map to [-1, 1]
-            values.append((int_val / 2**31) - 1.0)
-
-        if normalize:
-            self._normalize_inplace(values)
-
-        return values
-
-    def embed_batch(
-        self, texts: Sequence[str], *, normalize: bool = True
-    ) -> List[List[float]]:
-        """Embed a batch of texts."""
-        return [self.embed(t, normalize=normalize) for t in texts]
-
-    # ------------------------------------------------------------------ #
-    # Helpers
-    # ------------------------------------------------------------------ #
-
-    @staticmethod
-    def _normalize_inplace(vec: List[float]) -> None:
-        """Normalize a vector to unit L2 norm in-place, if non-zero."""
-        norm_sq = sum(x * x for x in vec)
-        if norm_sq <= 0.0:
-            return
-        inv_norm = 1.0 / math.sqrt(norm_sq)
-        for i, x in enumerate(vec):
-            vec[i] = x * inv_norm
+    def embed_batch(self, texts: Sequence[str]) -> List[List[float]]:
+        """Embed a batch of strings into vectors."""
+        return [_hash_embed(t, self._config.dim) for t in texts]
 
 
-# -----------------------------------------------------------------------------
-# Global embedder instance (lazy-initialized)
-# -----------------------------------------------------------------------------
-
-_EMBEDDER: Optional[SimpleHashEmbedder] = None
-_CONFIG = EmbedderConfig()  # You can later wire this from a central config
+# ---- Internal hashing-based mock backend --------------------------------------
 
 
-def _create_embedder_from_config(config: EmbedderConfig) -> SimpleHashEmbedder:
+def _hash_embed(text: str, dim: int) -> List[float]:
     """
-    Factory for the current embedder backend.
+    Deterministic hash-based embedding.
 
-    If you later introduce a real embedder, this is the only place that
-    needs to be updated to pick a different backend based on configuration.
+    - Uses SHA-256 over the UTF-8 text.
+    - Expands/repeats digest bytes to the requested dimension.
+    - Normalizes each byte into [-1.0, 1.0].
     """
-    logger.info(
-        "Initializing RAG embedder backend '%s' (dim=%d)",
-        config.backend_name,
-        config.dim,
-    )
-    return SimpleHashEmbedder(config)
+    if dim <= 0:
+        raise ValueError("dim must be positive")
+
+    if not text:
+        return [0.0] * dim
+
+    digest = hashlib.sha256(text.encode("utf-8")).digest()
+    dlen = len(digest)
+    vec: List[float] = []
+
+    for i in range(dim):
+        b = digest[i % dlen]
+        # Map 0..255 -> -1.0..1.0
+        vec.append((b / 255.0) * 2.0 - 1.0)
+
+    return vec
 
 
-def get_embedder() -> SimpleHashEmbedder:
+# ---- Singleton accessors used by PrimusCore/RAG stack ------------------------
+
+
+_embedder_singleton: RAGEmbedder | None = None
+
+
+def get_embedder() -> RAGEmbedder:
     """
-    Return the global embedder instance, creating it on first use.
+    Return a process-wide singleton RAGEmbedder.
 
-    This keeps initialization lazy (no work done unless the RAG system
-    actually calls into the embedder).
+    This is what other modules (indexer, retriever, PrimusCore) should call.
     """
-    global _EMBEDDER
-    if _EMBEDDER is None:
-        _EMBEDDER = _create_embedder_from_config(_CONFIG)
-    return _EMBEDDER
+    global _embedder_singleton
+    if _embedder_singleton is None:
+        _embedder_singleton = RAGEmbedder()
+    return _embedder_singleton
 
 
-# -----------------------------------------------------------------------------
-# Public convenience API
-# -----------------------------------------------------------------------------
-
-def embed_text(text: str, *, normalize: bool = True) -> List[float]:
-    """Embed a single text string using the default embedder."""
-    return get_embedder().embed(text, normalize=normalize)
-
-
-def embed_texts(
-    texts: Iterable[str],
-    *,
-    normalize: bool = True,
-) -> List[List[float]]:
+def get_embedder_status() -> dict:
     """
-    Embed an iterable of texts using the default embedder.
+    Status payload used by PrimusCore.run_self_test().
 
-    `texts` may be any iterable, but is internally materialized into a list to
-    allow multiple passes if needed by future backends.
+    Must at least return:
+      - backend: str
+      - dim: int
+      - configured: bool
     """
-    materialized = list(texts)
-    if not materialized:
-        return []
-    return get_embedder().embed_batch(materialized, normalize=normalize)
+    emb = get_embedder()
+    return {
+        "backend": emb.backend,
+        "dim": emb.dim,
+        "configured": True,
+    }
 
 
-def get_embedder_status() -> Dict[str, Any]:
-    """
-    Return a status dictionary describing the embedder backend.
-
-    This is consumed by `PrimusCore.run_self_test()` like:
-
-        status = get_embedder_status()
-        results["rag"] = {"status": "ok", **status}
-
-    So this function must **not** raise on normal paths; errors should be
-    encoded into the returned dict instead, while logging for debugging.
-    """
-    try:
-        emb = get_embedder()
-        return {
-            "backend": emb.backend_name,
-            "dim": emb.dim,
-            "configured": True,
-        }
-    except Exception as exc:  # pragma: no cover - defensive path
-        logger.exception("Embedder status check failed: %s", exc)
-        return {
-            "backend": "unavailable",
-            "configured": False,
-            "detail": str(exc),
-        }
+__all__ = [
+    "EMBED_DIM",
+    "EmbedderConfig",
+    "RAGEmbedder",
+    "get_embedder",
+    "get_embedder_status",
+]
