@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
 import argparse
 import logging
-import sys
 from pathlib import Path
 
 from core.primus_runtime import PrimusRuntime
-from core.primus_core import PrimusCore
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 
-# ---------------------------------------------------------
+# ------------------------------------
 # command: chat
-# ---------------------------------------------------------
+# ------------------------------------
 def cli_chat(args):
     runtime = PrimusRuntime()
     core = runtime._ensure_core()
@@ -20,9 +18,9 @@ def cli_chat(args):
     print(reply)
 
 
-# ---------------------------------------------------------
-# command: cl  (captain's log)
-# ---------------------------------------------------------
+# ------------------------------------
+# command: captain's log
+# ------------------------------------
 def cli_captains_log(args):
     runtime = PrimusRuntime()
     core = runtime._ensure_core()
@@ -30,9 +28,9 @@ def cli_captains_log(args):
     print(result)
 
 
-# ---------------------------------------------------------
+# ------------------------------------
 # command: rag-index
-# ---------------------------------------------------------
+# ------------------------------------
 def cli_rag_index(args):
     runtime = PrimusRuntime()
     core = runtime._ensure_core()
@@ -41,24 +39,21 @@ def cli_rag_index(args):
     core.rag_index(path, recursive=args.recursive)
 
 
-# ---------------------------------------------------------
+# ------------------------------------
 # command: rag-search
-# ---------------------------------------------------------
+# ------------------------------------
 def cli_rag_search(args):
     runtime = PrimusRuntime()
     core = runtime._ensure_core()
 
-    index = args.index
-    query = args.query
-    results = core.rag_retrieve(index, query)
-
+    results = core.rag_retrieve(args.index, args.query)
     for score, text in results:
         print(f"[{score:.4f}] {text}")
 
 
-# ---------------------------------------------------------
-# main
-# ---------------------------------------------------------
+# ------------------------------------
+# MAIN
+# ------------------------------------
 def main():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
@@ -68,7 +63,7 @@ def main():
     p_chat.add_argument("message")
     p_chat.set_defaults(func=cli_chat)
 
-    # captain's log
+    # captain’s log
     p_cl = sub.add_parser("cl")
     p_cl.add_argument("action", choices=["write", "read"])
     p_cl.add_argument("text", nargs="?", default="")
