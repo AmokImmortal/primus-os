@@ -1,154 +1,205 @@
-# rag/embedder.py
-#!/usr/bin/env python3
 """
-Lightweight RAG embedding backend for PRIMUS OS.
+rag.embedder
 
-This module is intentionally simple and offline-friendly:
+Light-weight, dependency-free embedder shim used by the RAG subsystem.
 
-- Provides a tiny RAGManager wrapper used by PrimusCore.
-- Uses a trivial hash-based "embedding" so that:
-    * The code runs without external dependencies.
-    * The RAG self-test can verify the pipeline end-to-end.
-- Can be replaced later with a real embedding backend (e.g. sentence-transformers,
-  OpenAI embeddings, etc.) without changing the PrimusCore interface.
+Right now this provides a **deterministic hash-based embedder** so that:
+
+- The RAG pipeline has a working embedding interface.
+- `PrimusCore.run_self_test()` can query status via `get_embedder_status()`.
+- You can later swap in a “real” embedding model (e.g. sentence-transformers)
+  without changing the rest of the codebase.
+
+This module deliberately avoids external dependencies so the core system can
+boot on a bare-bones environment.
 """
 
 from __future__ import annotations
 
 import hashlib
-import json
-from pathlib import Path
-from typing import Any, Dict, Iterable, List, Tuple
+import logging
+import math
+from dataclasses import dataclass
+from typing import Iterable, List, Dict, Any, Optional, Sequence
+
+logger = logging.getLogger(__name__)
 
 
-class RAGManager:
+# -----------------------------------------------------------------------------
+# Configuration & data structures
+# -----------------------------------------------------------------------------
+
+DEFAULT_EMBED_DIM = 384  # Safe, typical dimensionality for many text embedders
+
+
+@dataclass
+class EmbedderConfig:
+    """Configuration for the local embedder backend."""
+
+    dim: int = DEFAULT_EMBED_DIM
+    backend_name: str = "hash-mock"  # descriptive label for self-test / logs
+
+
+class SimpleHashEmbedder:
     """
-    Minimal RAG manager that:
-      - Stores a tiny local "index" as JSON in <system_root>/rag/index.jsonl
-      - Exposes a very small self_test() API used by PrimusCore.run_self_test()
-      - Provides basic add_documents() and search() hooks for future expansion.
+    Deterministic, stateless hash-based embedder.
+
+    This is a stand-in backend that maps text to a pseudo-random but
+    deterministic vector, using SHA-256 under the hood. It is *not* a semantic
+    embedding model, but it gives upstream code something vector-shaped to work
+    with so the RAG pipeline can be developed and tested.
+
+    You can later replace this with a real model (e.g. sentence-transformers)
+    by:
+      - Adding a new backend class.
+      - Updating `_create_embedder_from_config()` to instantiate it.
     """
 
-    def __init__(self, system_root: Path | str):
-        self.system_root = Path(system_root)
-        self.rag_dir = self.system_root / "rag"
-        self.rag_dir.mkdir(parents=True, exist_ok=True)
+    def __init__(self, config: EmbedderConfig) -> None:
+        self.config = config
+        self.dim = config.dim
+        self.backend_name = config.backend_name
 
-        self.index_path = self.rag_dir / "index.jsonl"
+    # ------------------------------------------------------------------ #
+    # Core embedding methods
+    # ------------------------------------------------------------------ #
 
-    # -----------------------------------------------------
-    # Internal helpers
-    # -----------------------------------------------------
+    def embed(self, text: str, *, normalize: bool = True) -> List[float]:
+        """Embed a single text string into a vector of length `self.dim`."""
+        if not isinstance(text, str):
+            raise TypeError(f"text must be str, got {type(text)!r}")
 
-    def _hash_text(self, text: str) -> List[float]:
-        """
-        Extremely simple "embedding": SHA256 -> list of floats in [0, 1].
+        # Normalize whitespace for determinism
+        normalized = " ".join(text.split())
+        digest = hashlib.sha256(normalized.encode("utf-8")).digest()
 
-        This is NOT semantically meaningful; it's only here so that the
-        pipeline has something to operate on without external libraries.
-        """
-        h = hashlib.sha256(text.encode("utf-8")).digest()
-        # Take first 16 bytes and normalize to [0, 1]
-        return [b / 255.0 for b in h[:16]]
+        # Expand digest to required length by repeated hashing
+        raw_bytes = bytearray()
+        counter = 0
+        while len(raw_bytes) < self.dim * 4:
+            counter_bytes = counter.to_bytes(4, "little", signed=False)
+            raw_bytes.extend(hashlib.sha256(digest + counter_bytes).digest())
+            counter += 1
 
-    def _add_to_index(self, doc_id: str, text: str, meta: Dict[str, Any]) -> None:
-        embedding = self._hash_text(text)
-        record = {
-            "id": doc_id,
-            "text": text,
-            "embedding": embedding,
-            "meta": meta,
+        # Convert bytes to floats in [-1, 1]
+        values: List[float] = []
+        for i in range(self.dim):
+            chunk = raw_bytes[i * 4 : (i + 1) * 4]
+            int_val = int.from_bytes(chunk, "little", signed=False)
+            # Map to [-1, 1]
+            values.append((int_val / 2**31) - 1.0)
+
+        if normalize:
+            self._normalize_inplace(values)
+
+        return values
+
+    def embed_batch(
+        self, texts: Sequence[str], *, normalize: bool = True
+    ) -> List[List[float]]:
+        """Embed a batch of texts."""
+        return [self.embed(t, normalize=normalize) for t in texts]
+
+    # ------------------------------------------------------------------ #
+    # Helpers
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _normalize_inplace(vec: List[float]) -> None:
+        """Normalize a vector to unit L2 norm in-place, if non-zero."""
+        norm_sq = sum(x * x for x in vec)
+        if norm_sq <= 0.0:
+            return
+        inv_norm = 1.0 / math.sqrt(norm_sq)
+        for i, x in enumerate(vec):
+            vec[i] = x * inv_norm
+
+
+# -----------------------------------------------------------------------------
+# Global embedder instance (lazy-initialized)
+# -----------------------------------------------------------------------------
+
+_EMBEDDER: Optional[SimpleHashEmbedder] = None
+_CONFIG = EmbedderConfig()  # You can later wire this from a central config
+
+
+def _create_embedder_from_config(config: EmbedderConfig) -> SimpleHashEmbedder:
+    """
+    Factory for the current embedder backend.
+
+    If you later introduce a real embedder, this is the only place that
+    needs to be updated to pick a different backend based on configuration.
+    """
+    logger.info(
+        "Initializing RAG embedder backend '%s' (dim=%d)",
+        config.backend_name,
+        config.dim,
+    )
+    return SimpleHashEmbedder(config)
+
+
+def get_embedder() -> SimpleHashEmbedder:
+    """
+    Return the global embedder instance, creating it on first use.
+
+    This keeps initialization lazy (no work done unless the RAG system
+    actually calls into the embedder).
+    """
+    global _EMBEDDER
+    if _EMBEDDER is None:
+        _EMBEDDER = _create_embedder_from_config(_CONFIG)
+    return _EMBEDDER
+
+
+# -----------------------------------------------------------------------------
+# Public convenience API
+# -----------------------------------------------------------------------------
+
+def embed_text(text: str, *, normalize: bool = True) -> List[float]:
+    """Embed a single text string using the default embedder."""
+    return get_embedder().embed(text, normalize=normalize)
+
+
+def embed_texts(
+    texts: Iterable[str],
+    *,
+    normalize: bool = True,
+) -> List[List[float]]:
+    """
+    Embed an iterable of texts using the default embedder.
+
+    `texts` may be any iterable, but is internally materialized into a list to
+    allow multiple passes if needed by future backends.
+    """
+    materialized = list(texts)
+    if not materialized:
+        return []
+    return get_embedder().embed_batch(materialized, normalize=normalize)
+
+
+def get_embedder_status() -> Dict[str, Any]:
+    """
+    Return a status dictionary describing the embedder backend.
+
+    This is consumed by `PrimusCore.run_self_test()` like:
+
+        status = get_embedder_status()
+        results["rag"] = {"status": "ok", **status}
+
+    So this function must **not** raise on normal paths; errors should be
+    encoded into the returned dict instead, while logging for debugging.
+    """
+    try:
+        emb = get_embedder()
+        return {
+            "backend": emb.backend_name,
+            "dim": emb.dim,
+            "configured": True,
         }
-        with self.index_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record) + "\n")
-
-    def _iter_index(self) -> Iterable[Dict[str, Any]]:
-        if not self.index_path.exists():
-            return []
-        with self.index_path.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    yield json.loads(line)
-                except Exception:
-                    continue
-
-    # -----------------------------------------------------
-    # Public API
-    # -----------------------------------------------------
-
-    def add_documents(
-        self,
-        docs: Iterable[Tuple[str, str]],
-        meta: Dict[str, Any] | None = None,
-    ) -> int:
-        """
-        Add (id, text) documents to the index.
-
-        Returns the number of documents successfully added.
-        """
-        meta = meta or {}
-        count = 0
-        for doc_id, text in docs:
-            self._add_to_index(doc_id, text, meta)
-            count += 1
-        return count
-
-    def embed_text(self, text: str) -> List[float]:
-        """Return a deterministic numeric embedding for a single text string."""
-        return self._hash_text(text)
-
-    def search(self, query: str, top_k: int = 5) -> List[Dict[str, Any]]:
-        """
-        Extremely naive "similarity" search:
-          - Embed the query.
-          - Compute L1 distance from each stored embedding.
-          - Return the closest top_k items.
-        """
-        q_emb = self._hash_text(query)
-        results: List[Tuple[float, Dict[str, Any]]] = []
-
-        for rec in self._iter_index():
-            emb = rec.get("embedding")
-            if not isinstance(emb, list):
-                continue
-            # L1 distance between embeddings
-            dist = sum(abs((float(a) if a is not None else 0.0) - float(b)) for a, b in zip(q_emb, emb))
-            results.append((dist, rec))
-
-        results.sort(key=lambda x: x[0])
-        return [r[1] for r in results[:top_k]]
-
-    # -----------------------------------------------------
-    # Self-test used by PrimusCore
-    # -----------------------------------------------------
-
-    def self_test(self) -> Dict[str, Any]:
-        """
-        Very small self-test used by PrimusCore.run_self_test().
-
-        Verifies that:
-          - The rag directory is writable.
-          - We can add a document to the index.
-          - We can perform a trivial search over that index.
-        """
-        result: Dict[str, Any] = {"status": "ok"}
-        try:
-            # Ensure directory exists and is writable
-            self.rag_dir.mkdir(parents=True, exist_ok=True)
-
-            # Add a test document
-            test_id = "selftest-doc"
-            test_text = "This is a small RAG self-test document for PRIMUS OS."
-            self._add_to_index(test_id, test_text, {"source": "selftest"})
-
-            # Perform a tiny search
-            hits = self.search("RAG self-test", top_k=1)
-            result["hits_found"] = len(hits)
-            result["index_path"] = str(self.index_path)
-        except Exception as exc:
-            result["status"] = "error"
-            result["error"] = str(exc)
-        return result
+    except Exception as exc:  # pragma: no cover - defensive path
+        logger.exception("Embedder status check failed: %s", exc)
+        return {
+            "backend": "unavailable",
+            "configured": False,
+            "detail": str(exc),
+        }
