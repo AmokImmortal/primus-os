@@ -1,125 +1,89 @@
-# System/primus_cli.py
+#!/usr/bin/env python3
 import argparse
 import logging
-import os
-import sys
+from pathlib import Path
 
-# Ensure the System root is on sys.path so "core" can be imported when running from C:\P.R.I.M.U.S OS\System
-CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-if CURRENT_DIR not in sys.path:
-    sys.path.insert(0, CURRENT_DIR)
+from core.primus_runtime import PrimusRuntime
 
-try:
-    from core.primus_runtime import PrimusRuntime
-except ImportError as e:
-    print(f"[FATAL] Failed to import PrimusRuntime from core.primus_runtime: {e}")
-    sys.exit(1)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 
-def configure_logging() -> None:
-    """
-    Configure a simple log file for the CLI, plus stdout logging.
-    """
-    logs_dir = os.path.join(CURRENT_DIR, "core", "system_logs")
-    os.makedirs(logs_dir, exist_ok=True)
-    log_path = os.path.join(logs_dir, "primus_cli.log")
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(message)s",
-        handlers=[
-            logging.FileHandler(log_path, encoding="utf-8"),
-            logging.StreamHandler(sys.stdout),
-        ],
-    )
-
-
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="PRIMUS OS Command Line Interface"
-    )
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    # Single-turn chat command
-    chat_parser = subparsers.add_parser(
-        "chat", help="Send a single-turn message to PRIMUS and print the reply."
-    )
-    chat_parser.add_argument(
-        "message",
-        type=str,
-        help="User message to send to PRIMUS.",
-    )
-
-    # Bootup self-test (delegates to PrimusRuntime.run_bootup_test)
-    selftest_parser = subparsers.add_parser(
-        "bootup-test",
-        help="Run the PRIMUS bootup self-test (security, subchats, model backend).",
-    )
-    # No extra args for now; uses defaults inside PrimusRuntime
-
-    return parser
-
-
-def cmd_chat(args: argparse.Namespace) -> int:
-    """
-    Handle: primus_cli.py chat "Hello PRIMUS"
-    """
+# ------------------------------------
+# command: chat
+# ------------------------------------
+def cli_chat(args):
     runtime = PrimusRuntime()
-    try:
-        if not hasattr(runtime, "chat_once"):
-            raise AttributeError(
-                "PrimusRuntime.chat_once() is not implemented. "
-                "Please ensure core/primus_runtime.py defines chat_once(self, user_message: str) -> str."
-            )
-        response = runtime.chat_once(args.message)
-        print(f"User: {args.message}")
-        print(f"PRIMUS: {response}")
-        return 0
-    except Exception as e:  # noqa: BLE001
-        logging.exception("Chat command failed.")
-        print(f"Chat error: {e}")
-        return 1
+    core = runtime._ensure_core()
+    reply = core.chat(message=args.message)
+    print(reply)
 
 
-def cmd_bootup_test(args: argparse.Namespace) -> int:
-    """
-    Handle: primus_cli.py bootup-test
-    """
+# ------------------------------------
+# command: captain's log
+# ------------------------------------
+def cli_captains_log(args):
     runtime = PrimusRuntime()
-    try:
-        if not hasattr(runtime, "run_bootup_test"):
-            raise AttributeError(
-                "PrimusRuntime.run_bootup_test() is not implemented. "
-                "Please ensure core/primus_runtime.py defines run_bootup_test(self) -> int."
-            )
-        rc = runtime.run_bootup_test()
-        print(f"Bootup self-test completed with exit code: {rc}")
-        return rc
-    except Exception as e:  # noqa: BLE001
-        logging.exception("Bootup-test command failed.")
-        print(f"Bootup-test error: {e}")
-        return 1
+    core = runtime._ensure_core()
+    result = core.captains_log(args.action, args.text)
+    print(result)
 
 
-def main(argv: list[str] | None = None) -> int:
-    configure_logging()
-    parser = build_parser()
-    args = parser.parse_args(argv)
+# ------------------------------------
+# command: rag-index
+# ------------------------------------
+def cli_rag_index(args):
+    runtime = PrimusRuntime()
+    core = runtime._ensure_core()
 
-    if args.command == "chat":
-        return cmd_chat(args)
-    if args.command == "bootup-test":
-        return cmd_bootup_test(args)
+    path = Path(args.path).resolve()
+    core.rag_index(path, recursive=args.recursive)
 
-    parser.print_help()
-    return 1
+
+# ------------------------------------
+# command: rag-search
+# ------------------------------------
+def cli_rag_search(args):
+    runtime = PrimusRuntime()
+    core = runtime._ensure_core()
+
+    results = core.rag_retrieve(args.index, args.query)
+    for score, text in results:
+        print(f"[{score:.4f}] {text}")
+
+
+# ------------------------------------
+# MAIN
+# ------------------------------------
+def main():
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    # chat
+    p_chat = sub.add_parser("chat")
+    p_chat.add_argument("message")
+    p_chat.set_defaults(func=cli_chat)
+
+    # captain’s log
+    p_cl = sub.add_parser("cl")
+    p_cl.add_argument("action", choices=["write", "read"])
+    p_cl.add_argument("text", nargs="?", default="")
+    p_cl.set_defaults(func=cli_captains_log)
+
+    # rag-index
+    p_index = sub.add_parser("rag-index")
+    p_index.add_argument("path")
+    p_index.add_argument("--recursive", action="store_true")
+    p_index.set_defaults(func=cli_rag_index)
+
+    # rag-search
+    p_search = sub.add_parser("rag-search")
+    p_search.add_argument("index")
+    p_search.add_argument("query")
+    p_search.set_defaults(func=cli_rag_search)
+
+    args = parser.parse_args()
+    args.func(args)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
-
-
-
-
-
-
+    main()

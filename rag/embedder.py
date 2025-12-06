@@ -1,145 +1,142 @@
-# embedder.py
 """
-PRIMUS RAG embedder
-- Provides Embedder class and get_embedder(model_name) helper.
-- Uses sentence-transformers and PyTorch; auto-detects CUDA if available.
-- Returns numpy float32 vectors suitable for FAISS.
-Location: C:\P.R.I.M.U.S OS\System\rag\embedder.py
+rag.embedder
+
+Light-weight, dependency-free embedder shim used by the RAG subsystem.
+
+Right now this provides a **deterministic hash-based embedder** so that:
+
+- The RAG pipeline has a working embedding interface.
+- `PrimusCore.run_self_test()` can query status via `get_embedder_status()`.
+- You can later swap in a “real” embedding model (e.g. sentence-transformers)
+  without changing the rest of the codebase.
+
+This module deliberately avoids external dependencies so the core system can
+boot on a bare-bones environment.
 """
 
-import os
-import math
-from typing import List, Optional
+from __future__ import annotations
 
-import numpy as np
+import hashlib
+import logging
+from dataclasses import dataclass
+from typing import Iterable, List, Sequence
 
-# Lazy import SentenceTransformer to allow graceful failure if not installed
-try:
-    from sentence_transformers import SentenceTransformer
-except Exception as e:
-    SentenceTransformer = None  # ingest/query will still handle this case
+logger = logging.getLogger(__name__)
+
+# Public constants
+EMBED_DIM: int = 384
+DEFAULT_BACKEND: str = "hash-mock"
 
 
-def _detect_device() -> str:
+@dataclass(frozen=True)
+class EmbedderConfig:
+    """Configuration for the RAG embedder backend."""
+    backend: str = DEFAULT_BACKEND
+    dim: int = EMBED_DIM
+
+
+class RAGEmbedder:
     """
-    Decide whether to use 'cuda' or 'cpu'.
-    You can override by setting environment variable PRIMUS_EMBED_DEVICE.
+    Simple, deterministic mock embedder used for bootstrapping and testing.
+
+    This does NOT produce semantically meaningful vectors; it just turns text
+    into a stable numeric vector so the rest of the RAG stack can be developed.
     """
-    env = os.environ.get("PRIMUS_EMBED_DEVICE", "").lower()
-    if env in ("cpu", "cuda"):
-        return env
-    # auto-detect
-    try:
-        import torch
-        return "cuda" if torch.cuda.is_available() else "cpu"
-    except Exception:
-        return "cpu"
-
-
-class Embedder:
-    """
-    Wraps a SentenceTransformer model with batching & device handling.
-    embed(texts: List[str]) -> np.ndarray shape (N, dim) dtype float32
-    """
-
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2", device: Optional[str] = None, batch_size: int = 128):
-        if SentenceTransformer is None:
-            raise RuntimeError("sentence-transformers is not installed. Install with: pip install sentence-transformers")
-
-        self.model_name = model_name
-        self.device = device or _detect_device()
-        self.batch_size = max(1, int(batch_size))
-
-        # Load model
-        # SentenceTransformer moves model to device in __init__ when calling .to()
-        print(f"[Embedder] Loading model: {self.model_name}")
-        try:
-            # instantiate model
-            self.model = SentenceTransformer(self.model_name)
-            # attempt to move to desired device
-            try:
-                # This .to() call can be needed depending on sentence-transformers version
-                self.model.to(self.device)
-            except Exception:
-                # Some versions already moved; ignore if fails
-                pass
-        except Exception as e:
-            raise RuntimeError(f"[Embedder] Failed to load model '{self.model_name}': {e}")
-
-        # determine embedding dimension by encoding an empty string
-        try:
-            dummy = self.model.encode([""], convert_to_numpy=True)
-            self.dim = int(dummy.shape[1])
-        except Exception:
-            # fallback
-            self.dim = None
-
-        print(f"[Embedder] Device: {self.device}; Batch size: {self.batch_size}; Dim: {self.dim}")
-
-    def embed(self, texts: List[str]) -> np.ndarray:
-        """
-        Embed a list of texts — returns numpy array shape (N, dim) dtype float32
-        Batches automatically to avoid OOM.
-        """
-        if not isinstance(texts, list):
-            raise ValueError("texts must be a list of strings")
-
-        n = len(texts)
-        if n == 0:
-            return np.zeros((0, self.dim if self.dim else 0), dtype=np.float32)
-
-        # guard: convert non-str to str
-        texts = [t if isinstance(t, str) else str(t) for t in texts]
-
-        # compute batch count
-        batch_size = self.batch_size
-        batches = math.ceil(n / batch_size)
-        out = []
-
-        for i in range(batches):
-            start = i * batch_size
-            end = min((i + 1) * batch_size, n)
-            batch_texts = texts[start:end]
-            try:
-                emb = self.model.encode(batch_texts, convert_to_numpy=True, show_progress_bar=False)
-            except TypeError:
-                # older/newer API differences: try without convert_to_numpy
-                emb = self.model.encode(batch_texts, show_progress_bar=False)
-                # if returned list, convert
-                if not isinstance(emb, np.ndarray):
-                    emb = np.asarray(emb)
-
-            # Ensure dtype float32
-            emb = np.asarray(emb, dtype=np.float32)
-            out.append(emb)
-
-        result = np.vstack(out).astype(np.float32)
-
-        # If we couldn't infer dim earlier, set it now
-        if self.dim is None and result.ndim == 2:
-            self.dim = result.shape[1]
-
-        return result
+    def __init__(self, config: EmbedderConfig | None = None) -> None:
+        self._config = config or EmbedderConfig()
+        logger.info(
+            "Initializing RAG embedder backend %r (dim=%d)",
+            self._config.backend,
+            self._config.dim,
+        )
 
     @property
-    def using_gpu(self) -> bool:
-        return self.device.startswith("cuda")
+    def backend(self) -> str:
+        return self._config.backend
+
+    @property
+    def dim(self) -> int:
+        return self._config.dim
+
+    # ---- Public embedding API -------------------------------------------------
+
+    def embed_text(self, text: str) -> List[float]:
+        """Embed a single text string into a fixed-size vector."""
+        return _hash_embed(text, self._config.dim)
+
+    def embed_batch(self, texts: Sequence[str]) -> List[List[float]]:
+        """Embed a batch of strings into vectors."""
+        return [_hash_embed(t, self._config.dim) for t in texts]
 
 
-# Helper factory used by ingest.py and query.py
-def get_embedder(model_name: str = "all-MiniLM-L6-v2", device: Optional[str] = None, batch_size: int = 128) -> Embedder:
+# ---- Internal hashing-based mock backend --------------------------------------
+
+
+def _hash_embed(text: str, dim: int) -> List[float]:
     """
-    Returns an Embedder instance. Kept as a helper for the scripts.
+    Deterministic hash-based embedding.
+
+    - Uses SHA-256 over the UTF-8 text.
+    - Expands/repeats digest bytes to the requested dimension.
+    - Normalizes each byte into [-1.0, 1.0].
     """
-    return Embedder(model_name=model_name, device=device, batch_size=batch_size)
+    if dim <= 0:
+        raise ValueError("dim must be positive")
+
+    if not text:
+        return [0.0] * dim
+
+    digest = hashlib.sha256(text.encode("utf-8")).digest()
+    dlen = len(digest)
+    vec: List[float] = []
+
+    for i in range(dim):
+        b = digest[i % dlen]
+        # Map 0..255 -> -1.0..1.0
+        vec.append((b / 255.0) * 2.0 - 1.0)
+
+    return vec
 
 
-# Simple CLI test (optional)
-if __name__ == "__main__":
-    # quick smoke test when executed directly
-    model = os.environ.get("PRIMUS_TEST_MODEL", "all-MiniLM-L6-v2")
-    e = get_embedder(model)
-    print("[Embedder] Ready. Device:", e.device, "Dim:", e.dim)
-    sample = ["Hello world", "This is a test"]
-    vecs = e.embed(sample)
-    print("[Embedder] Embedded", vecs.shape)
+# ---- Singleton accessors used by PrimusCore/RAG stack ------------------------
+
+
+_embedder_singleton: RAGEmbedder | None = None
+
+
+def get_embedder() -> RAGEmbedder:
+    """
+    Return a process-wide singleton RAGEmbedder.
+
+    This is what other modules (indexer, retriever, PrimusCore) should call.
+    """
+    global _embedder_singleton
+    if _embedder_singleton is None:
+        _embedder_singleton = RAGEmbedder()
+    return _embedder_singleton
+
+
+def get_embedder_status() -> dict:
+    """
+    Status payload used by PrimusCore.run_self_test().
+
+    Must at least return:
+      - backend: str
+      - dim: int
+      - configured: bool
+    """
+    emb = get_embedder()
+    return {
+        "backend": emb.backend,
+        "dim": emb.dim,
+        "configured": True,
+    }
+
+
+__all__ = [
+    "EMBED_DIM",
+    "EmbedderConfig",
+    "RAGEmbedder",
+    "get_embedder",
+    "get_embedder_status",
+]
