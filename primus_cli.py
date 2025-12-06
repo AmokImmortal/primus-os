@@ -8,7 +8,7 @@ Command-line interface for PRIMUS OS (Core developer/admin CLI).
   the CLI still runs and provides clear guidance.
 
 Place this file at:
-r"C:\P.R.I.M.U.S OS\System\primus_cli.py"
+"C:\\P.R.I.M.U.S OS\\System\\primus_cli.py"
 
 Usage examples:
     python primus_cli.py status
@@ -60,6 +60,22 @@ logger = logging.getLogger("primus_cli")
 # -----------------------
 # Utilities
 # -----------------------
+def set_log_level(level_name: str) -> None:
+    """Update logging verbosity for the CLI session."""
+
+    level = getattr(logging, level_name.upper(), logging.INFO)
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
+    logger.setLevel(level)
+
+    for handler in root_logger.handlers:
+        handler.setLevel(level)
+    for handler in logger.handlers:
+        handler.setLevel(level)
+
+    logger.debug("Log level set to %s", level_name)
+
+
 def safe_import(module: str, attr: Optional[str] = None):
     """
     Attempt to import a module or a module.attr. Return the imported object or None.
@@ -390,6 +406,40 @@ def cmd_rag(args):
         return
 
 
+def cmd_rag_index(args):
+    logger.info("PRIMUS CLI: rag-index requested")
+    core_mod = safe_import("core")
+    rag_index_func = getattr(core_mod, "rag_index_path", None) if core_mod else None
+
+    if not callable(rag_index_func):
+        print("rag_index_path not available. Ensure core.rag_index_path exists.")
+        return
+
+    try:
+        result = rag_index_func(args.path, recursive=bool(args.recursive))
+        pretty_print_object(result)
+    except Exception:
+        logger.exception("RAG index operation failed")
+        show_trace()
+
+
+def cmd_rag_search(args):
+    logger.info("PRIMUS CLI: rag-search requested")
+    core_mod = safe_import("core")
+    rag_search_func = getattr(core_mod, "rag_retrieve", None) if core_mod else None
+
+    if not callable(rag_search_func):
+        print("rag_retrieve not available. Ensure core.rag_retrieve exists.")
+        return
+
+    try:
+        result = rag_search_func(args.index, args.query)
+        pretty_print_object(result)
+    except Exception:
+        logger.exception("RAG search operation failed")
+        show_trace()
+
+
 def cmd_chat(args):
     """
     Single-turn chat when a message is provided; otherwise fallback to REPL.
@@ -450,6 +500,7 @@ def cmd_chat(args):
             print("PRIMUS>", "(no runtime send method available)")
 
 
+
 def cmd_subchats(args):
     runtime, _ = get_runtime()
     if not runtime:
@@ -485,6 +536,7 @@ def cmd_subchats(args):
         print("Runtime does not expose create_subchat().")
 
 
+
 def cmd_logs(args):
     lf = LOG_FILE
     if lf.exists():
@@ -496,6 +548,7 @@ def cmd_logs(args):
         print("No CLI log file found.")
 
 
+
 def cmd_debug(args):
     print("Debug info:")
     cmd_status(args)
@@ -504,11 +557,71 @@ def cmd_debug(args):
     print("PYTHONPATH:", os.environ.get("PYTHONPATH", "").split(os.pathsep)[:3])
 
 
+def cmd_captains_log(args):
+    """Captain's Log Master Root Mode controls (Phase 1)."""
+
+    runtime, _ = get_runtime()
+    if not runtime:
+        print("Runtime not available. Ensure primus_runtime exists.")
+        return
+
+    sub = getattr(args, "cl_command", None)
+    if sub == "enter":
+        if hasattr(runtime, "enter_captains_log_mode"):
+            try:
+                runtime.enter_captains_log_mode()
+                print("Captain's Log Master Root Mode: ACTIVE")
+            except Exception:
+                logger.exception("Failed to enter Captain's Log mode")
+                show_trace()
+        else:
+            print("Runtime does not expose enter_captains_log_mode().")
+        return
+
+    if sub == "exit":
+        if hasattr(runtime, "exit_captains_log_mode"):
+            try:
+                runtime.exit_captains_log_mode()
+                print("Captain's Log Master Root Mode: INACTIVE")
+            except Exception:
+                logger.exception("Failed to exit Captain's Log mode")
+                show_trace()
+        else:
+            print("Runtime does not expose exit_captains_log_mode().")
+        return
+
+    if sub == "status":
+        manager = getattr(runtime, "captains_log_manager", None)
+        status = None
+        if manager and hasattr(manager, "get_status"):
+            try:
+                status = manager.get_status()
+            except Exception:
+                logger.exception("Failed to retrieve Captain's Log status")
+                show_trace()
+
+        if status is None:
+            status = {"status": "unavailable", "mode": "unknown"}
+
+        mode = status.get("mode", "unknown")
+        health = status.get("status", "unknown")
+        print(f"Captain's Log system : {health.upper()} (mode={mode})")
+        return
+
+    print("Unsupported Captain's Log command.")
+
+
 # -----------------------
 # CLI argument parsing
 # -----------------------
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="primus", description="PRIMUS OS CLI")
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Logging verbosity for CLI operations",
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     # status
@@ -553,6 +666,17 @@ def build_parser() -> argparse.ArgumentParser:
     rag_search.add_argument("--model", type=str, default="all-MiniLM-L6-v2")
     rag_search.set_defaults(func=cmd_rag)
 
+    # RAG indexing/search (direct helpers)
+    p_rag_index = sub.add_parser("rag-index", help="Index a path into RAG")
+    p_rag_index.add_argument("path", type=str, help="Path to documents or directory")
+    p_rag_index.add_argument("--recursive", action="store_true", help="Recursively index directories")
+    p_rag_index.set_defaults(func=cmd_rag_index)
+
+    p_rag_search_direct = sub.add_parser("rag-search", help="Search a RAG index")
+    p_rag_search_direct.add_argument("index", type=str, help="Index name or path")
+    p_rag_search_direct.add_argument("query", type=str, help="Search query")
+    p_rag_search_direct.set_defaults(func=cmd_rag_search)
+
     # subchats
     p_subchat = sub.add_parser("subchats", help="Subchat operations")
     subchat_sub = p_subchat.add_subparsers(dest="subchat_command", required=True)
@@ -562,6 +686,16 @@ def build_parser() -> argparse.ArgumentParser:
     subchat_create.add_argument("--label", required=True, help="Subchat label")
     subchat_create.add_argument("--private", action="store_true", help="Mark subchat private")
     subchat_create.set_defaults(func=cmd_subchats)
+
+    # Captain's Log controls
+    p_cl = sub.add_parser("cl", help="Captain's Log Master Root Mode controls")
+    cl_sub = p_cl.add_subparsers(dest="cl_command", required=True)
+    cl_enter = cl_sub.add_parser("enter", help="Enter Captain's Log Master Root Mode")
+    cl_enter.set_defaults(func=cmd_captains_log)
+    cl_exit = cl_sub.add_parser("exit", help="Exit Captain's Log Master Root Mode")
+    cl_exit.set_defaults(func=cmd_captains_log)
+    cl_status = cl_sub.add_parser("status", help="Show Captain's Log status")
+    cl_status.set_defaults(func=cmd_captains_log)
 
     # chat
     p_chat = sub.add_parser("chat", help="Single-turn chat or interactive REPL if no message is provided")
@@ -585,6 +719,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main():
     parser = build_parser()
     args = parser.parse_args()
+    set_log_level(getattr(args, "log_level", "INFO"))
     try:
         if hasattr(args, "func"):
             args.func(args)
