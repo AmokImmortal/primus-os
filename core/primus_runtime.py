@@ -259,7 +259,11 @@ class PrimusRuntime:
         Delegates to PrimusCore.chat_once if present; otherwise falls back
         to using the underlying ModelManager directly.
         """
+    def chat_once(self, user_message: str) -> str:
+        """
         Runtime-level wrapper for a single chat turn with optional session + RAG.
+        """
+        # existing code...
 
         # Preferred: PrimusCore.chat_once API
         chat_fn = getattr(core, "chat_once", None)
