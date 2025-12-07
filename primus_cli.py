@@ -6,7 +6,7 @@ Top-level CLI for PRIMUS OS.
 
 Commands:
   - chat        : single-turn chat (RAG-aware via PrimusRuntime.chat_once)
-  - chat-rag    : alias for RAG-aware chat (for future expansion)
+  - chat-rag    : alias for RAG-aware chat
   - cl          : Captain's Log controls (if available on core)
   - rag-index   : index a folder of documents into a named RAG index
   - rag-search  : search a named RAG index with a query
@@ -37,7 +37,6 @@ def cli_chat(args: argparse.Namespace) -> None:
     print(reply)
 
 
-# Optional alias: chat-rag (currently same as chat_once; kept for clarity)
 def cli_chat_rag(args: argparse.Namespace) -> None:
     runtime = PrimusRuntime()
     reply = runtime.chat_once(args.message)
@@ -68,18 +67,13 @@ def cli_captains_log(args: argparse.Namespace) -> None:
 
 
 def cli_rag_index(args: argparse.Namespace) -> None:
-    """
-    Index a path into a named RAG index.
-
-    Default index name is derived from the folder name if --name is not given.
-    """
     runtime = PrimusRuntime()
     core = runtime._ensure_core()  # type: ignore[attr-defined]
 
     path = Path(args.path).resolve()
     index_name = args.name or path.name
 
-    core.rag_index_path(name=index_name, path=path, recursive=args.recursive)
+    core.rag_index_path(name=index_name, path=str(path), recursive=args.recursive)
     print(f"[OK] Indexed '{path}' as index '{index_name}'")
 
 
@@ -89,9 +83,6 @@ def cli_rag_index(args: argparse.Namespace) -> None:
 
 
 def cli_rag_search(args: argparse.Namespace) -> None:
-    """
-    Search a named RAG index with a query.
-    """
     runtime = PrimusRuntime()
     core = runtime._ensure_core()  # type: ignore[attr-defined]
 
@@ -121,30 +112,10 @@ def build_parser() -> argparse.ArgumentParser:
         description="PRIMUS OS command-line interface",
     )
 
-    sub = parser.add_subparsers(dest="command", required=True)
-
-    # Captain's Log controls
-    p_cl = subparsers.add_parser("cl", help="Captain's Log Master Root Mode controls")
-    cl_sub = p_cl.add_subparsers(dest="cl_command", required=True)
-    cl_enter = cl_sub.add_parser("enter", help="Enter Captain's Log Master Root Mode")
-    cl_enter.set_defaults(func=cmd_captains_log)
-    cl_exit = cl_sub.add_parser("exit", help="Exit Captain's Log Master Root Mode")
-    cl_exit.set_defaults(func=cmd_captains_log)
-    cl_status = cl_sub.add_parser("status", help="Show Captain's Log status")
-    cl_status.set_defaults(func=cmd_captains_log)
-
-    # Captain's Log controls
-    p_cl = add_command("cl", help="Captain's Log Master Root Mode controls")
-    cl_sub = p_cl.add_subparsers(dest="cl_command", required=True)
-    cl_enter = cl_sub.add_parser("enter", help="Enter Captain's Log Master Root Mode")
-    cl_enter.set_defaults(func=cmd_captains_log)
-    cl_exit = cl_sub.add_parser("exit", help="Exit Captain's Log Master Root Mode")
-    cl_exit.set_defaults(func=cmd_captains_log)
-    cl_status = cl_sub.add_parser("status", help="Show Captain's Log status")
-    cl_status.set_defaults(func=cmd_captains_log)
+    subparsers = parser.add_subparsers(dest="command", required=True)
 
     # chat
-    p_chat = sub.add_parser(
+    p_chat = subparsers.add_parser(
         "chat",
         help="Single-turn chat (RAG-aware, via PrimusRuntime.chat_once)",
     )
@@ -152,15 +123,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_chat.set_defaults(func=cli_chat)
 
     # chat-rag (alias)
-    p_chat_rag = sub.add_parser(
+    p_chat_rag = subparsers.add_parser(
         "chat-rag",
         help="Alias for RAG-aware chat (reserved for future advanced options)",
     )
     p_chat_rag.add_argument("message", help="User message to send to PRIMUS (RAG-aware)")
     p_chat_rag.set_defaults(func=cli_chat_rag)
 
-    # Captain's Log
-    p_cl = sub.add_parser(
+    # Captain's Log (simple write/read)
+    p_cl = subparsers.add_parser(
         "cl",
         help="Captain's Log controls (if available on PrimusCore)",
     )
@@ -174,7 +145,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_cl.set_defaults(func=cli_captains_log)
 
     # rag-index
-    p_index = sub.add_parser(
+    p_index = subparsers.add_parser(
         "rag-index",
         help="Index a path into a named RAG index",
     )
@@ -191,7 +162,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_index.set_defaults(func=cli_rag_index)
 
     # rag-search
-    p_search = sub.add_parser(
+    p_search = subparsers.add_parser(
         "rag-search",
         help="Search a named RAG index with a query",
     )
@@ -216,6 +187,9 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
+    if not hasattr(args, "func"):
+        parser.print_help()
+        return
     args.func(args)
 
 
