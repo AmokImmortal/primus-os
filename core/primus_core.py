@@ -21,6 +21,7 @@ import logging
 import os
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -88,9 +89,10 @@ except Exception:
     logger.warning("MemoryManager not available; memory features will be limited.")
 
 try:
-    from core.session_manager import SessionManager
+    from core.session_manager import SessionManager, SessionNotFound
 except Exception:
     SessionManager = None
+    SessionNotFound = None  # type: ignore
     logger.warning("SessionManager not available; sessions will be limited.")
 
 
@@ -601,6 +603,156 @@ class PrimusCore:
         }
         logger.debug("Status requested: %s", status)
         return status
+
+    # -------------------------
+    # Chat APIs (unified entrypoint)
+    # -------------------------
+    def chat(
+        self,
+        user_message: str,
+        session_id: Optional[str] = None,
+        use_rag: bool = False,
+        rag_index: Optional[str] = None,
+        max_tokens: int = 256,
+    ) -> str:
+        """
+        Unified chat entrypoint for PrimusCore.
+
+        Parameters mirror the runtime and CLI surface so all chat flows stay centralized. The
+        method will:
+        - Load an existing session history when session_id is provided, creating a new session
+          skeleton if it is missing.
+        - Optionally retrieve RAG context when requested and an index name is supplied.
+        - Build a single prompt that combines a brief system primer, optional RAG context, prior
+          turns (when sessions are enabled), and the latest user message.
+        - Delegate generation to the configured ModelManager and persist the new turn when
+          sessions are active.
+        """
+
+        if not self.model_manager:
+            raise RuntimeError("ModelManager not initialized; cannot generate responses.")
+
+        # Session handling: allow stateless chats when no session manager or id is provided.
+        history: List[Dict[str, Any]] = []
+        active_session_id: Optional[str] = None
+        session_available = self.session_manager is not None
+
+        if session_id:
+            if not session_available:
+                raise RuntimeError("SessionManager not initialized; session-based chat unavailable.")
+            active_session_id, history = self._load_or_initialize_session(session_id)
+
+        # Optional RAG retrieval
+        retrieved_snippets: List[Tuple[str, str]] = []  # (score, snippet)
+        if use_rag and rag_index and self.rag and hasattr(self.rag, "search"):
+            try:
+                hits = self.rag.search(query=user_message, scope=rag_index, topk=3)
+                for hit in hits:
+                    metadata = hit.get("metadata", {}) if isinstance(hit, dict) else {}
+                    path = metadata.get("path") or metadata.get("source") or rag_index
+                    text = metadata.get("text") or hit.get("preview") or hit.get("text") or ""
+                    preview = text[:240] + ("..." if len(text) > 240 else "")
+                    score = hit.get("score") or hit.get("distance") or 0.0
+                    retrieved_snippets.append((str(score) if score is not None else "?", f"{path}: {preview}"))
+            except Exception:
+                logger.warning("RAG retrieval failed or index missing; proceeding without context.", exc_info=True)
+
+        # Build prompt
+        prompt_parts: List[str] = []
+        prompt_parts.append(
+            "System: You are PRIMUS, the local-first assistant for PRIMUS OS. "
+            "Respond concisely and helpfully while respecting privacy constraints."
+        )
+
+        if retrieved_snippets:
+            rag_block_lines = ["RAG context:"]
+            for score, snippet in retrieved_snippets:
+                rag_block_lines.append(f"- [score={score}] {snippet}")
+            prompt_parts.append("\n".join(rag_block_lines))
+
+        if history:
+            history_lines: List[str] = []
+            for msg in history:
+                role = msg.get("role", "user").lower()
+                who = msg.get("who", role).capitalize()
+                text = msg.get("text", "")
+                label = "User" if role == "user" else "Assistant"
+                history_lines.append(f"{label} ({who}): {text}")
+            prompt_parts.append("Conversation history:\n" + "\n".join(history_lines))
+
+        prompt_parts.append(f"User: {user_message}")
+        prompt_parts.append("Assistant:")
+        prompt = "\n\n".join(prompt_parts)
+
+        try:
+            reply_text = self.model_manager.generate(prompt, max_tokens=max_tokens)
+        except Exception as exc:
+            logger.exception("Model generation failed")
+            raise RuntimeError(f"Model generation failed: {exc}") from exc
+
+        if session_available and active_session_id:
+            try:
+                self.session_manager.add_message(active_session_id, role="user", who="user", text=user_message)
+                self.session_manager.add_message(active_session_id, role="agent", who="PRIMUS", text=reply_text)
+            except Exception:
+                logger.exception("Failed to record chat messages to session")
+
+        return reply_text
+
+    def chat_once(
+        self,
+        user_message: str,
+        session_id: Optional[str] = None,
+        use_rag: bool = False,
+        rag_index: Optional[str] = None,
+        max_tokens: int = 256,
+    ) -> str:
+        """
+        Convenience wrapper primarily used by PrimusRuntime for single-turn chats. Delegates to
+        :meth:`chat` without adding extra logic.
+        """
+        return self.chat(
+            user_message=user_message,
+            session_id=session_id,
+            use_rag=use_rag,
+            rag_index=rag_index,
+            max_tokens=max_tokens,
+        )
+
+    def _load_or_initialize_session(self, session_id: str) -> Tuple[str, List[Dict[str, Any]]]:
+        """Load session history or create a new session skeleton when missing."""
+        if not self.session_manager:
+            raise RuntimeError("SessionManager not initialized")
+
+        try:
+            session_ref = self.session_manager.load_session(session_id)
+            history = list(session_ref.get("messages", [])) if isinstance(session_ref, dict) else []
+            active_session_id = session_ref.get("id", session_id) if isinstance(session_ref, dict) else session_id
+            return active_session_id, history
+        except Exception as exc:
+            should_init = SessionNotFound is None or isinstance(exc, SessionNotFound)
+            if not should_init:
+                logger.exception("Failed to load session %s; continuing without history.", session_id)
+                return session_id, []
+
+        session = {
+            "id": session_id,
+            "title": session_id,
+            "created_at": datetime.utcnow().isoformat() + "Z",
+            "owner": "user",
+            "privacy": "private",
+            "agents_linked": [],
+            "messages": [],
+            "meta": {},
+        }
+        try:
+            if hasattr(self.session_manager, "_cache"):
+                self.session_manager._cache[session_id] = session
+            if hasattr(self.session_manager, "_save_to_disk"):
+                self.session_manager._save_to_disk(session)
+        except Exception:
+            logger.exception("Failed to initialize new session %s", session_id)
+        return session_id, []
 
     # -------------------------
     # Simple helper: allow an agent to request a RAG search across allowed scopes
