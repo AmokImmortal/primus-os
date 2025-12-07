@@ -1,0 +1,8 @@
+primus_cli.py chat "message" --session <id> keeps conversation history with the given session.
+primus_cli.py chat-interactive launches a REPL-style loop that reuses one session ID.
+primus_cli.py rag-index <path> --recursive builds or refreshes the system RAG index from text files.
+primus_cli.py rag-search <index> "query" returns scored matches from the chosen RAG index.
+primus_cli.py cl enter activates Captain's Log Master Root Mode; cl exit leaves it.
+primus_cli.py self-test runs the runtime bootup diagnostics to verify subsystems.
+PrimusRuntime bridges the CLI to PrimusCore so the CLI does not manage sessions or RAG directly.
+The deterministic embedder keeps RAG hashing stable across runs for predictable results.
