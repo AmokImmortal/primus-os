@@ -5,12 +5,13 @@ primus_cli.py
 Top-level CLI for PRIMUS OS.
 
 Commands:
-  - chat        : single-turn chat (via PrimusRuntime.chat_once)
-  - chat-rag    : alias for chat (reserved for future RAG-specific options)
-  - cl          : Captain's Log write/read (if available on PrimusCore)
+  - chat        : single-turn chat (RAG-aware via PrimusRuntime.chat_once)
+  - cl          : Captain's Log controls (simple write/read)
   - rag-index   : index a folder of documents into a named RAG index
   - rag-search  : search a named RAG index with a query
 """
+
+from __future__ import annotations
 
 import argparse
 import logging
@@ -32,17 +33,8 @@ logger = logging.getLogger("primus_cli")
 
 
 def cli_chat(args: argparse.Namespace) -> None:
-    """Single-turn chat using PrimusRuntime.chat_once."""
-    runtime = PrimusRuntime()
-    reply = runtime.chat_once(args.message)
-    print(reply)
-
-
-def cli_chat_rag(args: argparse.Namespace) -> None:
     """
-    Alias for chat; kept for future RAG-specific tuning.
-
-    For now this is identical to `chat`.
+    Single-turn chat via PrimusRuntime.chat_once.
     """
     runtime = PrimusRuntime()
     reply = runtime.chat_once(args.message)
@@ -56,9 +48,7 @@ def cli_chat_rag(args: argparse.Namespace) -> None:
 
 def cli_captains_log(args: argparse.Namespace) -> None:
     """
-    Simple Captain's Log wrapper.
-
-    Expects PrimusCore to expose a `captains_log(action, text)` method.
+    Simple Captain's Log wrapper: write/read.
     """
     runtime = PrimusRuntime()
     core = runtime._ensure_core()  # type: ignore[attr-defined]
@@ -81,20 +71,13 @@ def cli_rag_index(args: argparse.Namespace) -> None:
     """
     Index a path into a named RAG index.
 
-    Default index name is derived from the folder/file name if --name is not given.
+    Default index name is derived from the folder name if --name is not given.
     """
     runtime = PrimusRuntime()
     core = runtime._ensure_core()  # type: ignore[attr-defined]
 
     path = Path(args.path).resolve()
     index_name = args.name or path.name
-
-    logger.info(
-        "RAG index request: name=%r path=%r recursive=%r",
-        index_name,
-        str(path),
-        args.recursive,
-    )
 
     core.rag_index_path(name=index_name, path=str(path), recursive=args.recursive)
     print(f"[OK] Indexed '{path}' as index '{index_name}'")
@@ -116,13 +99,6 @@ def cli_rag_search(args: argparse.Namespace) -> None:
     query = args.query
     top_k = args.top_k
 
-    logger.info(
-        "RAG retrieve request: index=%r query_len=%d top_k=%d",
-        index_name,
-        len(query),
-        top_k,
-    )
-
     results = core.rag_retrieve(index_name, query, top_k=top_k)
 
     if not results:
@@ -130,7 +106,6 @@ def cli_rag_search(args: argparse.Namespace) -> None:
         return
 
     for score, doc in results:
-        # doc is expected to be a dict like {"path": ..., "text": ...}
         path = doc.get("path", "<unknown>")
         print(f"[{score:.4f}] {path}")
 
@@ -148,31 +123,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # Captain's Log controls
-    p_cl = subparsers.add_parser("cl", help="Captain's Log Master Root Mode controls")
-    cl_sub = p_cl.add_subparsers(dest="cl_command", required=True)
-    cl_enter = cl_sub.add_parser("enter", help="Enter Captain's Log Master Root Mode")
-    cl_enter.set_defaults(func=cli_captains_log)
-    cl_exit = cl_sub.add_parser("exit", help="Exit Captain's Log Master Root Mode")
-    cl_exit.set_defaults(func=cli_captains_log)
-    cl_status = cl_sub.add_parser("status", help="Show Captain's Log status")
-    cl_status.set_defaults(func=cli_captains_log)
-
     # chat
     p_chat = subparsers.add_parser(
         "chat",
-        help="Single-turn chat (via PrimusRuntime.chat_once)",
+        help="Single-turn chat (RAG-aware, via PrimusRuntime.chat_once)",
     )
     p_chat.add_argument("message", help="User message to send to PRIMUS")
     p_chat.set_defaults(func=cli_chat)
-
-    # chat-rag (alias)
-    p_chat_rag = subparsers.add_parser(
-        "chat-rag",
-        help="Alias for chat (reserved for future RAG-specific options)",
-    )
-    p_chat_rag.add_argument("message", help="User message to send to PRIMUS (RAG-aware)")
-    p_chat_rag.set_defaults(func=cli_chat_rag)
 
     # Captain's Log (simple write/read)
     p_cl = subparsers.add_parser(
@@ -184,7 +141,7 @@ def build_parser() -> argparse.ArgumentParser:
         "text",
         nargs="?",
         default="",
-        help="Text to write (for 'write' action); ignored for 'read'",
+        help="Text to write (for 'write'); ignored for 'read'",
     )
     p_cl.set_defaults(func=cli_captains_log)
 
