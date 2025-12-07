@@ -603,6 +603,134 @@ class PrimusCore:
         return status
 
     # -------------------------
+    # Chat APIs (unified entrypoint)
+    # -------------------------
+    def chat(
+        self,
+        user_message: str,
+        session_id: Optional[str] = None,
+        use_rag: bool = False,
+        rag_index: Optional[str] = None,
+        max_tokens: int = 256,
+    ) -> str:
+        """
+        Unified chat entrypoint for PrimusCore.
+
+        Flow:
+        - Optionally load/create a session to accumulate history when a session_id is supplied.
+        - Optionally perform RAG retrieval when requested and an index is provided.
+        - Build a single prompt that includes system guidance, prior turns, optional RAG context,
+          and the current user message, then delegate generation to ModelManager.
+        - Persist the new turn back to the session when a session_id is in play.
+        """
+
+        if not self.model_manager:
+            raise RuntimeError("ModelManager not initialized; cannot generate responses.")
+
+        # Session handling: allow stateless chats when no session manager or id is provided.
+        history: List[Dict[str, Any]] = []
+        active_session_id: Optional[str] = None
+        session_available = self.session_manager is not None
+
+        if session_id:
+            if not session_available:
+                raise RuntimeError("SessionManager not initialized; session-based chat unavailable.")
+            try:
+                session_ref = self.session_manager.load_session(session_id)
+                history = list(session_ref.get("messages", [])) if isinstance(session_ref, dict) else []
+                active_session_id = session_ref.get("id", session_id) if isinstance(session_ref, dict) else session_id
+            except Exception:
+                logger.warning("Session '%s' not found; starting new history for this id.", session_id)
+                active_session_id = session_id
+                history = []
+        elif session_available:
+            try:
+                session_ref = self.session_manager.create_session(title="Ad-hoc session")
+                active_session_id = session_ref.get("id")
+                history = list(session_ref.get("messages", [])) if isinstance(session_ref, dict) else []
+            except Exception:
+                logger.exception("Failed to create ad-hoc session; continuing without persistence")
+                active_session_id = None
+                history = []
+
+        # Optional RAG retrieval
+        retrieved_snippets: List[Tuple[str, str]] = []  # (score, snippet)
+        if use_rag and rag_index and self.rag and hasattr(self.rag, "search"):
+            try:
+                hits = self.rag.search(query=user_message, scope=rag_index, topk=3)
+                for hit in hits:
+                    score = hit.get("score")
+                    preview = hit.get("preview") or hit.get("metadata", {}).get("text")
+                    if preview:
+                        retrieved_snippets.append((str(score) if score is not None else "?", str(preview)))
+            except Exception:
+                logger.warning("RAG retrieval failed or index missing; proceeding without context.", exc_info=True)
+
+        # Build prompt
+        prompt_parts: List[str] = []
+        prompt_parts.append(
+            "System: You are PRIMUS, the local-first assistant for PRIMUS OS. "
+            "Respond concisely and helpfully while respecting privacy constraints."
+        )
+
+        if retrieved_snippets:
+            rag_block_lines = ["RAG context:"]
+            for score, snippet in retrieved_snippets:
+                rag_block_lines.append(f"- [score={score}] {snippet}")
+            prompt_parts.append("\n".join(rag_block_lines))
+
+        if history:
+            history_lines: List[str] = []
+            for msg in history:
+                role = msg.get("role", "user").lower()
+                who = msg.get("who", role).capitalize()
+                text = msg.get("text", "")
+                label = "User" if role == "user" else "Assistant"
+                history_lines.append(f"{label} ({who}): {text}")
+            prompt_parts.append("Conversation history:\n" + "\n".join(history_lines))
+
+        prompt_parts.append(f"User: {user_message}")
+        prompt_parts.append("Assistant:")
+        prompt = "\n\n".join(prompt_parts)
+
+        try:
+            reply_text = self.model_manager.generate(prompt, max_tokens=max_tokens)
+        except Exception as exc:
+            logger.exception("Model generation failed")
+            raise RuntimeError(f"Model generation failed: {exc}") from exc
+
+        if session_available and active_session_id:
+            try:
+                self.session_manager.add_message(active_session_id, role="user", who="user", text=user_message)
+                self.session_manager.add_message(active_session_id, role="agent", who="PRIMUS", text=reply_text)
+            except Exception:
+                logger.exception("Failed to record chat messages to session")
+
+        return reply_text
+
+    def chat_once(
+        self,
+        user_message: str,
+        session_id: Optional[str] = None,
+        use_rag: bool = True,
+        rag_index: Optional[str] = None,
+        max_tokens: int = 256,
+    ) -> str:
+        """
+        Convenience wrapper for single-turn chats.
+        """
+        resolved_use_rag = bool(use_rag) and self.rag is not None
+        resolved_index = rag_index if resolved_use_rag else None
+
+        return self.chat(
+            user_message=user_message,
+            session_id=session_id,
+            use_rag=resolved_use_rag,
+            rag_index=resolved_index,
+            max_tokens=max_tokens,
+        )
+
+    # -------------------------
     # Simple helper: allow an agent to request a RAG search across allowed scopes
     # -------------------------
     def agent_search(self, agent_name: str, query: str, topk: int = 5) -> Dict[str, Any]:

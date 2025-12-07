@@ -13,7 +13,7 @@ Responsibilities:
 - Run core security + diagnostic self-tests during startup when requested.
 
 Location (example):
-    r"C:\P.R.I.M.U.S OS\System\core\primus_runtime.py"
+    "C:\\P.R.I.M.U.S OS\\System\\core\\primus_runtime.py"
 """
 
 from __future__ import annotations
@@ -38,6 +38,10 @@ PROJECT_ROOT = SYSTEM_ROOT.parent
 for path in (SYSTEM_ROOT, PROJECT_ROOT):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
+
+SYSTEM_DIR = SYSTEM_ROOT / "System"
+if SYSTEM_DIR.exists() and str(SYSTEM_DIR) not in sys.path:
+    sys.path.insert(0, str(SYSTEM_DIR))
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -93,6 +97,20 @@ except Exception:
     logger.warning("diagnostics.integrity_checker not available; integrity checks limited.")
 
 try:
+    from captains_log.cl_manager import CaptainsLogManager, get_manager as get_captains_log_manager
+except Exception:
+    CaptainsLogManager = None
+    get_captains_log_manager = None
+    logger.warning("captains_log.cl_manager not available; Captain's Log manager unavailable.")
+
+try:
+    from core.security_gate import SecurityGate, get_security_gate
+except Exception:
+    SecurityGate = None
+    get_security_gate = None
+    logger.warning("core.security_gate not available; SecurityGate unavailable.")
+
+try:
     from security.security_layer import get_security_layer
 except Exception:
     get_security_layer = None
@@ -123,6 +141,10 @@ class PrimusRuntime:
     def __init__(self):
         self.security_layer = get_security_layer() if get_security_layer else None
         self.security_enforcer = SecurityEnforcer.get() if SecurityEnforcer else None
+        self.captains_log_manager = (
+            get_captains_log_manager() if get_captains_log_manager else None
+        )
+        self.security_gate = get_security_gate() if get_security_gate else None
         self._core: Optional[PrimusCore] = None
 
         logger.info(
@@ -147,6 +169,38 @@ class PrimusRuntime:
             logger.info("PrimusCore initialized with status: %s", json.dumps(init_status, indent=2))
 
         return self._core
+
+    # -------------------------
+    # Captain's Log helpers
+    # -------------------------
+
+    def enter_captains_log_mode(self) -> None:
+        """Request entry into Captain's Log Master Root mode."""
+
+        if not self.captains_log_manager:
+            logger.warning("Captain's Log manager unavailable; cannot enter mode.")
+            return
+
+        logger.info("PrimusRuntime: enter Captain's Log requested.")
+        self.captains_log_manager.enter()
+
+    def exit_captains_log_mode(self) -> None:
+        """Request exit from Captain's Log Master Root mode."""
+
+        if not self.captains_log_manager:
+            logger.warning("Captain's Log manager unavailable; cannot exit mode.")
+            return
+
+        logger.info("PrimusRuntime: exit Captain's Log requested.")
+        self.captains_log_manager.exit()
+
+    def is_captains_log_active(self) -> bool:
+        """Return whether Captain's Log Master Root mode is active."""
+
+        if not self.captains_log_manager:
+            return False
+
+        return self.captains_log_manager.is_active()
 
     # -------------------------
     # Security-aware startup
@@ -216,25 +270,62 @@ class PrimusRuntime:
     # Chat wrapper for CLI
     # -------------------------
 
-    def chat_once(self, user_message: str) -> str:
+    def chat_once(
+        self,
+        user_message: str,
+        session_id: Optional[str] = None,
+        use_rag: bool = False,
+        rag_index: Optional[str] = None,
+        max_tokens: int = 256,
+    ) -> str:
+        """Runtime-level wrapper for a single chat turn.
+
+        The runtime remains the sole gateway for CLI/GUI callers while
+        forwarding all chat configuration to PrimusCore. The runtime itself does
+        not implement any chat logic beyond delegation and lightweight logging.
+        This docstring is intentionally compact to avoid any parsing ambiguity
+        across environments that treat wrapped text differently.
         """
-        Runtime-level wrapper for a single chat turn.
-        Delegates to PrimusCore + ModelManager (local llama.cpp backend).
-        """
+
+        logger.info(
+            "PrimusRuntime.chat_once called (session_id=%s, use_rag=%s, rag_index=%s, max_tokens=%s)",
+            session_id,
+            use_rag,
+            rag_index,
+            max_tokens,
+        )
         core = self._ensure_core()
+        return core.chat(
+            user_message=user_message,
+            session_id=session_id,
+            use_rag=use_rag,
+            rag_index=rag_index,
+            max_tokens=max_tokens,
+        )
 
-        if not core.model_manager:
-            raise RuntimeError("ModelManager is not available; cannot generate a response.")
+    def chat_with_options(
+        self,
+        user_message: str,
+        session_id: Optional[str] = None,
+        index_name: Optional[str] = None,
+        use_rag: bool = False,
+        max_tokens: int = 256,
+    ) -> str:
+        """
+        Bridge helper for CLI and other entrypoints to invoke PrimusCore.chat.
 
-        # Simple, neutral prompt format for now.
-        prompt = f"User: {user_message}\nAssistant:"
+        This keeps runtime as the single adapter layer while allowing callers to
+        toggle session reuse and RAG options without reaching into PrimusCore
+        directly.
+        """
 
-        logger.info("chat_once invoked with user message length=%d", len(user_message))
-
-        reply = core.model_manager.generate(prompt, max_tokens=256)
-
-        logger.info("chat_once completed; reply length=%d", len(reply))
-        return reply
+        return self.chat_once(
+            user_message=user_message,
+            session_id=session_id,
+            use_rag=use_rag,
+            rag_index=index_name,
+            max_tokens=max_tokens,
+        )
 
     # -------------------------
     # Bootup self-test for CLI / --run-bootup-test
@@ -276,6 +367,46 @@ class PrimusRuntime:
         except Exception as exc:  # noqa: BLE001
             print(f"Core initialization : FAILED ({exc})")
             logger.exception("Bootup Test - Core initialization failed: %s", exc)
+            ok_all = False
+
+        # Captain's Log status
+        try:
+            if self.captains_log_manager:
+                cl_active = self.captains_log_manager.is_active()
+                cl_mode = "captains_log" if cl_active else "normal"
+                print(f"Captain's Log system : WORKING (mode={cl_mode})")
+                logger.info(
+                    "Bootup Test - Captain's Log status: active=%s mode=%s",
+                    cl_active,
+                    cl_mode,
+                )
+            else:
+                print("Captain's Log system : MISSING (manager unavailable)")
+                logger.warning("Bootup Test - Captain's Log manager unavailable.")
+                ok_all = False
+        except Exception as exc:  # noqa: BLE001
+            print(f"Captain's Log system : FAILED ({exc})")
+            logger.exception("Bootup Test - Captain's Log check failed: %s", exc)
+            ok_all = False
+
+        # Security Gate status
+        try:
+            if self.security_gate:
+                gate_status = self.security_gate.get_status()
+                gate_mode = gate_status.get("mode", "unknown")
+                net_allowed = gate_status.get("external_network_allowed", "unknown")
+                print(
+                    "Security Gate      : WORKING (mode=%s, external_network_allowed=%s)"
+                    % (gate_mode, net_allowed)
+                )
+                logger.info("Bootup Test - Security Gate status: %s", gate_status)
+            else:
+                print("Security Gate      : MISSING (not initialized)")
+                logger.warning("Bootup Test - SecurityGate unavailable.")
+                ok_all = False
+        except Exception as exc:  # noqa: BLE001
+            print(f"Security Gate      : FAILED ({exc})")
+            logger.exception("Bootup Test - SecurityGate check failed: %s", exc)
             ok_all = False
 
         # Subchat system
