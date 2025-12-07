@@ -115,60 +115,10 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # Captain's Log controls
-    p_cl = add_command("cl", help="Captain's Log Master Root Mode controls")
+    p_cl = subparsers.add_parser("cl", help="Captain's Log Master Root Mode controls")
     cl_sub = p_cl.add_subparsers(dest="cl_command", required=True)
     cl_enter = cl_sub.add_parser("enter", help="Enter Captain's Log Master Root Mode")
-    cl_enter.set_defaults(func=cmd_captains_log)
-    cl_exit = cl_sub.add_parser("exit", help="Exit Captain's Log Master Root Mode")
-    cl_exit.set_defaults(func=cmd_captains_log)
-    cl_status = cl_sub.add_parser("status", help="Show Captain's Log status")
-    cl_status.set_defaults(func=cmd_captains_log)
-
-    # Captain's Log controls
-    p_cl = add_command("cl", help="Captain's Log Master Root Mode controls")
-    cl_sub = p_cl.add_subparsers(dest="cl_command", required=True)
-    cl_enter = cl_sub.add_parser("enter", help="Enter Captain's Log Master Root Mode")
-    cl_enter.set_defaults(func=cmd_captains_log)
-    cl_exit = cl_sub.add_parser("exit", help="Exit Captain's Log Master Root Mode")
-    cl_exit.set_defaults(func=cmd_captains_log)
-    cl_status = cl_sub.add_parser("status", help="Show Captain's Log status")
-    cl_status.set_defaults(func=cmd_captains_log)
-
-    # Captain's Log controls
-    p_cl = add_command("cl", help="Captain's Log Master Root Mode controls")
-    cl_sub = p_cl.add_subparsers(dest="cl_command", required=True)
-    cl_enter = cl_sub.add_parser("enter", help="Enter Captain's Log Master Root Mode")
-    cl_enter.set_defaults(func=cmd_captains_log)
-    cl_exit = cl_sub.add_parser("exit", help="Exit Captain's Log Master Root Mode")
-    cl_exit.set_defaults(func=cmd_captains_log)
-    cl_status = cl_sub.add_parser("status", help="Show Captain's Log status")
-    cl_status.set_defaults(func=cmd_captains_log)
-
-    # Captain's Log controls
-    p_cl = add_command("cl", help="Captain's Log Master Root Mode controls")
-    cl_sub = p_cl.add_subparsers(dest="cl_command", required=True)
-    cl_enter = cl_sub.add_parser("enter", help="Enter Captain's Log Master Root Mode")
-    cl_enter.set_defaults(func=cmd_captains_log)
-    cl_exit = cl_sub.add_parser("exit", help="Exit Captain's Log Master Root Mode")
-    cl_exit.set_defaults(func=cmd_captains_log)
-    cl_status = cl_sub.add_parser("status", help="Show Captain's Log status")
-    cl_status.set_defaults(func=cmd_captains_log)
-
-    # Captain's Log controls
-    p_cl = add_command("cl", help="Captain's Log Master Root Mode controls")
-    cl_sub = p_cl.add_subparsers(dest="cl_command", required=True)
-    cl_enter = cl_sub.add_parser("enter", help="Enter Captain's Log Master Root Mode")
-    cl_enter.set_defaults(func=cmd_captains_log)
-    cl_exit = cl_sub.add_parser("exit", help="Exit Captain's Log Master Root Mode")
-    cl_exit.set_defaults(func=cmd_captains_log)
-    cl_status = cl_sub.add_parser("status", help="Show Captain's Log status")
-    cl_status.set_defaults(func=cmd_captains_log)
-
-    # Captain's Log controls
-    p_cl = sub.add_parser("cl", help="Captain's Log Master Root Mode controls")
-    cl_sub = p_cl.add_subparsers(dest="cl_command", required=True)
-    cl_enter = cl_sub.add_parser("enter", help="Enter Captain's Log Master Root Mode")
-    cl_enter.set_defaults(func=cmd_captains_log)
+    cl_enter.set_defaults(func=cli_captains_log)
     cl_exit = cl_sub.add_parser("exit", help="Exit Captain's Log Master Root Mode")
     cl_exit.set_defaults(func=cmd_captains_log)
     cl_status = cl_sub.add_parser("status", help="Show Captain's Log status")
@@ -178,7 +128,57 @@ def build_parser() -> argparse.ArgumentParser:
     p_cl = subparsers.add_parser("cl", help="Captain's Log Master Root Mode controls")
     cl_sub = p_cl.add_subparsers(dest="cl_command", required=True)
     cl_enter = cl_sub.add_parser("enter", help="Enter Captain's Log Master Root Mode")
-    cl_enter.set_defaults(func=cmd_captains_log)
+    cl_enter.set_defaults(func=cli_captains_log)
+    cl_exit = cl_sub.add_parser("exit", help="Exit Captain's Log Master Root Mode")
+    cl_exit.set_defaults(func=cmd_captains_log)
+    cl_status = cl_sub.add_parser("status", help="Show Captain's Log status")
+    cl_status.set_defaults(func=cmd_captains_log)
+
+    # Captain's Log controls
+    p_cl = subparsers.add_parser("cl", help="Captain's Log Master Root Mode controls")
+    cl_sub = p_cl.add_subparsers(dest="cl_command", required=True)
+    cl_enter = cl_sub.add_parser("enter", help="Enter Captain's Log Master Root Mode")
+    cl_enter.set_defaults(func=cli_captains_log)
+    cl_exit = cl_sub.add_parser("exit", help="Exit Captain's Log Master Root Mode")
+    cl_exit.set_defaults(func=cmd_captains_log)
+    cl_status = cl_sub.add_parser("status", help="Show Captain's Log status")
+    cl_status.set_defaults(func=cmd_captains_log)
+
+    # Captain's Log controls
+    p_cl = subparsers.add_parser("cl", help="Captain's Log Master Root Mode controls")
+    cl_sub = p_cl.add_subparsers(dest="cl_command", required=True)
+    cl_enter = cl_sub.add_parser("enter", help="Enter Captain's Log Master Root Mode")
+    cl_enter.set_defaults(func=cli_captains_log)
+    cl_exit = cl_sub.add_parser("exit", help="Exit Captain's Log Master Root Mode")
+    cl_exit.set_defaults(func=cmd_captains_log)
+    cl_status = cl_sub.add_parser("status", help="Show Captain's Log status")
+    cl_status.set_defaults(func=cmd_captains_log)
+
+    # Captain's Log controls
+    p_cl = subparsers.add_parser("cl", help="Captain's Log Master Root Mode controls")
+    cl_sub = p_cl.add_subparsers(dest="cl_command", required=True)
+    cl_enter = cl_sub.add_parser("enter", help="Enter Captain's Log Master Root Mode")
+    cl_enter.set_defaults(func=cli_captains_log)
+    cl_exit = cl_sub.add_parser("exit", help="Exit Captain's Log Master Root Mode")
+    cl_exit.set_defaults(func=cmd_captains_log)
+    cl_status = cl_sub.add_parser("status", help="Show Captain's Log status")
+    cl_status.set_defaults(func=cmd_captains_log)
+
+    # Captain's Log controls
+    p_cl = sub.add_parser("cl", help="Captain's Log Master Root Mode controls")
+    cl_sub = p_cl.add_subparsers(dest="cl_command", required=True)
+    cl_enter = cl_sub.add_parser("enter", help="Enter Captain's Log Master Root Mode")
+    cl_enter.set_defaults(func=cli_captains_log)
+    cl_exit = cl_sub.add_parser("exit", help="Exit Captain's Log Master Root Mode")
+    cl_exit.set_defaults(func=cmd_captains_log)
+    cl_status = cl_sub.add_parser("status", help="Show Captain's Log status")
+    cl_status.set_defaults(func=cmd_captains_log)
+
+    # Captain's Log controls
+    p_cl = subparsers.add_parser("cl", help="Captain's Log Master Root Mode controls")
+    cl_sub = p_cl.add_subparsers(dest="cl_command", required=True)
+    cl_enter = cl_sub.add_parser("enter", help="Enter Captain's Log Master Root Mode")
+    cl_enter.set_defaults(func=cli_captains_log)
     cl_exit = cl_sub.add_parser("exit", help="Exit Captain's Log Master Root Mode")
     cl_exit.set_defaults(func=cmd_captains_log)
     cl_status = cl_sub.add_parser("status", help="Show Captain's Log status")
