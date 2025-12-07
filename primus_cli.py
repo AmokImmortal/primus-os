@@ -8,7 +8,7 @@ Command-line interface for PRIMUS OS (Core developer/admin CLI).
   the CLI still runs and provides clear guidance.
 
 Place this file at:
-r"C:\P.R.I.M.U.S OS\System\primus_cli.py"
+"C:\\P.R.I.M.U.S OS\\System\\primus_cli.py"
 
 Usage examples:
     python primus_cli.py status
@@ -31,6 +31,7 @@ import sys
 import traceback
 from pathlib import Path
 from typing import Any, Dict, Optional
+import uuid
 
 # -----------------------
 # Basic environment setup
@@ -60,6 +61,22 @@ logger = logging.getLogger("primus_cli")
 # -----------------------
 # Utilities
 # -----------------------
+def set_log_level(level_name: str) -> None:
+    """Update logging verbosity for the CLI session."""
+
+    level = getattr(logging, level_name.upper(), logging.INFO)
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
+    logger.setLevel(level)
+
+    for handler in root_logger.handlers:
+        handler.setLevel(level)
+    for handler in logger.handlers:
+        handler.setLevel(level)
+
+    logger.debug("Log level set to %s", level_name)
+
+
 def safe_import(module: str, attr: Optional[str] = None):
     """
     Attempt to import a module or a module.attr. Return the imported object or None.
@@ -390,6 +407,40 @@ def cmd_rag(args):
         return
 
 
+def cmd_rag_index(args):
+    logger.info("PRIMUS CLI: rag-index requested")
+    core_mod = safe_import("core")
+    rag_index_func = getattr(core_mod, "rag_index_path", None) if core_mod else None
+
+    if not callable(rag_index_func):
+        print("rag_index_path not available. Ensure core.rag_index_path exists.")
+        return
+
+    try:
+        result = rag_index_func(args.path, recursive=bool(args.recursive))
+        pretty_print_object(result)
+    except Exception:
+        logger.exception("RAG index operation failed")
+        show_trace()
+
+
+def cmd_rag_search(args):
+    logger.info("PRIMUS CLI: rag-search requested")
+    core_mod = safe_import("core")
+    rag_search_func = getattr(core_mod, "rag_retrieve", None) if core_mod else None
+
+    if not callable(rag_search_func):
+        print("rag_retrieve not available. Ensure core.rag_retrieve exists.")
+        return
+
+    try:
+        result = rag_search_func(args.index, args.query)
+        pretty_print_object(result)
+    except Exception:
+        logger.exception("RAG search operation failed")
+        show_trace()
+
+
 def cmd_chat(args):
     """
     Single-turn chat when a message is provided; otherwise fallback to REPL.
@@ -402,9 +453,18 @@ def cmd_chat(args):
 
     if getattr(args, "message", None):
         try:
-            reply = runtime.chat_once(args.message) if hasattr(runtime, "chat_once") else None
+            if hasattr(runtime, "chat_with_options"):
+                reply = runtime.chat_with_options(
+                    user_message=args.message,
+                    session_id=getattr(args, "session", None),
+                    index_name=getattr(args, "index", None),
+                    use_rag=bool(getattr(args, "rag", False)),
+                    max_tokens=getattr(args, "max_tokens", 256),
+                )
+            else:
+                reply = runtime.chat_once(args.message) if hasattr(runtime, "chat_once") else None
             if reply is None:
-                print("Runtime does not expose chat_once(); no response available.")
+                print("Runtime does not expose chat capabilities; no response available.")
                 return
             print(f"User: {args.message}")
             print(f"PRIMUS: {reply}")
@@ -450,6 +510,55 @@ def cmd_chat(args):
             print("PRIMUS>", "(no runtime send method available)")
 
 
+def cmd_chat_interactive(args):
+    """Interactive multi-turn chat with persistent session and optional RAG."""
+    runtime, _ = get_runtime()
+    if not runtime:
+        print("Runtime not available. Chat will be local echo only.")
+        print("Start runtime first or implement core/primus_runtime.PrimusRuntime")
+        return
+
+    session_id = args.session or str(uuid.uuid4())
+    index_name = getattr(args, "index", "docs") or "docs"
+    use_rag = bool(getattr(args, "rag", False))
+    max_tokens = getattr(args, "max_tokens", 256)
+
+    print(f"Interactive chat started. Session={session_id} | RAG={'on' if use_rag else 'off'} | Index={index_name or 'none'}")
+    print("Type '/exit' or '/quit' to leave.")
+
+    while True:
+        try:
+            text = input("You> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nExiting chat.")
+            break
+
+        if not text:
+            continue
+        if text.lower() in ("/exit", "/quit"):
+            break
+
+        try:
+            if hasattr(runtime, "chat_with_options"):
+                reply = runtime.chat_with_options(
+                    user_message=text,
+                    session_id=session_id,
+                    index_name=index_name,
+                    use_rag=use_rag,
+                    max_tokens=max_tokens,
+                )
+            else:
+                reply = runtime.chat_once(text) if hasattr(runtime, "chat_once") else None
+            if reply is None:
+                print("PRIMUS> (no response available; runtime missing chat implementation)")
+                continue
+            print(f"PRIMUS> {reply}")
+        except Exception as exc:
+            logger.exception("interactive chat command failed")
+            print(f"Model backend error: {exc}")
+
+
+
 def cmd_subchats(args):
     runtime, _ = get_runtime()
     if not runtime:
@@ -485,6 +594,7 @@ def cmd_subchats(args):
         print("Runtime does not expose create_subchat().")
 
 
+
 def cmd_logs(args):
     lf = LOG_FILE
     if lf.exists():
@@ -496,6 +606,7 @@ def cmd_logs(args):
         print("No CLI log file found.")
 
 
+
 def cmd_debug(args):
     print("Debug info:")
     cmd_status(args)
@@ -504,31 +615,91 @@ def cmd_debug(args):
     print("PYTHONPATH:", os.environ.get("PYTHONPATH", "").split(os.pathsep)[:3])
 
 
+def cmd_captains_log(args):
+    """Captain's Log Master Root Mode controls (Phase 1)."""
+
+    runtime, _ = get_runtime()
+    if not runtime:
+        print("Runtime not available. Ensure primus_runtime exists.")
+        return
+
+    sub = getattr(args, "cl_command", None)
+    if sub == "enter":
+        if hasattr(runtime, "enter_captains_log_mode"):
+            try:
+                runtime.enter_captains_log_mode()
+                print("Captain's Log Master Root Mode: ACTIVE")
+            except Exception:
+                logger.exception("Failed to enter Captain's Log mode")
+                show_trace()
+        else:
+            print("Runtime does not expose enter_captains_log_mode().")
+        return
+
+    if sub == "exit":
+        if hasattr(runtime, "exit_captains_log_mode"):
+            try:
+                runtime.exit_captains_log_mode()
+                print("Captain's Log Master Root Mode: INACTIVE")
+            except Exception:
+                logger.exception("Failed to exit Captain's Log mode")
+                show_trace()
+        else:
+            print("Runtime does not expose exit_captains_log_mode().")
+        return
+
+    if sub == "status":
+        manager = getattr(runtime, "captains_log_manager", None)
+        status = None
+        if manager and hasattr(manager, "get_status"):
+            try:
+                status = manager.get_status()
+            except Exception:
+                logger.exception("Failed to retrieve Captain's Log status")
+                show_trace()
+
+        if status is None:
+            status = {"status": "unavailable", "mode": "unknown"}
+
+        mode = status.get("mode", "unknown")
+        health = status.get("status", "unknown")
+        print(f"Captain's Log system : {health.upper()} (mode={mode})")
+        return
+
+    print("Unsupported Captain's Log command.")
+
+
 # -----------------------
 # CLI argument parsing
 # -----------------------
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="primus", description="PRIMUS OS CLI")
-    sub = parser.add_subparsers(dest="cmd", required=True)
+    parser.add_argument(
+        "--log-level",
+        default="INFO",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
+        help="Logging verbosity for CLI operations",
+    )
+    subparsers = parser.add_subparsers(dest="cmd", required=True)
 
     # status
-    p_status = sub.add_parser("status", help="Show system status")
+    p_status = subparsers.add_parser("status", help="Show system status")
     p_status.set_defaults(func=cmd_status)
 
     # self-test
-    p_self = sub.add_parser("self-test", help="Run self-tests (boot/agents/checks)")
+    p_self = subparsers.add_parser("self-test", help="Run self-tests (boot/agents/checks)")
     p_self.set_defaults(func=cmd_self_test)
-    p_self_alt = sub.add_parser("selftest", help="Run self-tests (boot/agents/checks)")
+    p_self_alt = subparsers.add_parser("selftest", help="Run self-tests (boot/agents/checks)")
     p_self_alt.set_defaults(func=cmd_self_test)
 
     # start/stop
-    p_start = sub.add_parser("start", help="Start primus runtime")
+    p_start = subparsers.add_parser("start", help="Start primus runtime")
     p_start.set_defaults(func=cmd_start)
-    p_stop = sub.add_parser("stop", help="Stop primus runtime")
+    p_stop = subparsers.add_parser("stop", help="Stop primus runtime")
     p_stop.set_defaults(func=cmd_stop)
 
     # agent commands
-    p_agent = sub.add_parser("agent", help="Agent operations")
+    p_agent = subparsers.add_parser("agent", help="Agent operations")
     agent_sub = p_agent.add_subparsers(dest="agent_command", required=True)
     agent_list = agent_sub.add_parser("list", help="List available agents")
     agent_list.set_defaults(func=cmd_agent)
@@ -538,7 +709,7 @@ def build_parser() -> argparse.ArgumentParser:
     agent_call.set_defaults(func=cmd_agent)
 
     # RAG commands
-    p_rag = sub.add_parser("rag", help="RAG operations")
+    p_rag = subparsers.add_parser("rag", help="RAG operations")
     rag_sub = p_rag.add_subparsers(dest="rag_command", required=True)
     rag_ingest = rag_sub.add_parser("ingest", help="Ingest documents into RAG")
     rag_ingest.add_argument("--path", type=str, required=True, help="Path to documents")
@@ -553,8 +724,19 @@ def build_parser() -> argparse.ArgumentParser:
     rag_search.add_argument("--model", type=str, default="all-MiniLM-L6-v2")
     rag_search.set_defaults(func=cmd_rag)
 
+    # RAG indexing/search (direct helpers)
+    p_rag_index = subparsers.add_parser("rag-index", help="Index a path into RAG")
+    p_rag_index.add_argument("path", type=str, help="Path to documents or directory")
+    p_rag_index.add_argument("--recursive", action="store_true", help="Recursively index directories")
+    p_rag_index.set_defaults(func=cmd_rag_index)
+
+    p_rag_search_direct = subparsers.add_parser("rag-search", help="Search a RAG index")
+    p_rag_search_direct.add_argument("index", type=str, help="Index name or path")
+    p_rag_search_direct.add_argument("query", type=str, help="Search query")
+    p_rag_search_direct.set_defaults(func=cmd_rag_search)
+
     # subchats
-    p_subchat = sub.add_parser("subchats", help="Subchat operations")
+    p_subchat = subparsers.add_parser("subchats", help="Subchat operations")
     subchat_sub = p_subchat.add_subparsers(dest="subchat_command", required=True)
     subchat_list = subchat_sub.add_parser("list", help="List subchats")
     subchat_list.set_defaults(func=cmd_subchats)
@@ -563,17 +745,46 @@ def build_parser() -> argparse.ArgumentParser:
     subchat_create.add_argument("--private", action="store_true", help="Mark subchat private")
     subchat_create.set_defaults(func=cmd_subchats)
 
+    # Captain's Log controls
+    p_cl = subparsers.add_parser("cl", help="Captain's Log Master Root Mode controls")
+    cl_sub = p_cl.add_subparsers(dest="cl_command", required=True)
+    cl_enter = cl_sub.add_parser("enter", help="Enter Captain's Log Master Root Mode")
+    cl_enter.set_defaults(func=cmd_captains_log)
+    cl_exit = cl_sub.add_parser("exit", help="Exit Captain's Log Master Root Mode")
+    cl_exit.set_defaults(func=cmd_captains_log)
+    cl_status = cl_sub.add_parser("status", help="Show Captain's Log status")
+    cl_status.set_defaults(func=cmd_captains_log)
+
     # chat
-    p_chat = sub.add_parser("chat", help="Single-turn chat or interactive REPL if no message is provided")
+    p_chat = subparsers.add_parser("chat", help="Single-turn chat or interactive REPL if no message is provided")
     p_chat.add_argument("message", nargs="?", help="Optional single-turn message to send to PRIMUS")
-    p_chat.set_defaults(func=cmd_chat)
+    p_chat.add_argument("--session", type=str, help="Optional session identifier to reuse across calls")
+    p_chat.add_argument("--index", type=str, default="docs", help="RAG index name to use when --rag is enabled")
+    rag_group = p_chat.add_mutually_exclusive_group()
+    rag_group.add_argument("--rag", dest="rag", action="store_true", help="Enable RAG context for chat")
+    rag_group.add_argument("--no-rag", dest="rag", action="store_false", help="Disable RAG context for chat")
+    p_chat.set_defaults(func=cmd_chat, rag=True)
+    p_chat.add_argument("--max-tokens", type=int, default=256, help="Maximum tokens for model response")
+
+    # chat-interactive
+    p_chat_int = subparsers.add_parser(
+        "chat-interactive",
+        help="Interactive multi-turn chat with persistent session and optional RAG",
+    )
+    p_chat_int.add_argument("--session", type=str, help="Optional session identifier to reuse across turns")
+    p_chat_int.add_argument("--index", type=str, default="docs", help="RAG index name to use when --rag is enabled")
+    rag_group_int = p_chat_int.add_mutually_exclusive_group()
+    rag_group_int.add_argument("--rag", dest="rag", action="store_true", help="Enable RAG context for chat")
+    rag_group_int.add_argument("--no-rag", dest="rag", action="store_false", help="Disable RAG context for chat")
+    p_chat_int.set_defaults(func=cmd_chat_interactive, rag=True)
+    p_chat_int.add_argument("--max-tokens", type=int, default=256, help="Maximum tokens for model response")
 
     # logs
-    p_logs = sub.add_parser("logs", help="Show recent CLI logs")
+    p_logs = subparsers.add_parser("logs", help="Show recent CLI logs")
     p_logs.set_defaults(func=cmd_logs)
 
     # debug
-    p_debug = sub.add_parser("debug", help="Developer debug info")
+    p_debug = subparsers.add_parser("debug", help="Developer debug info")
     p_debug.set_defaults(func=cmd_debug)
 
     return parser
@@ -585,6 +796,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main():
     parser = build_parser()
     args = parser.parse_args()
+    set_log_level(getattr(args, "log_level", "INFO"))
     try:
         if hasattr(args, "func"):
             args.func(args)
