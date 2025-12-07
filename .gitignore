@@ -1,6 +1,65 @@
 venv/
 __pycache__/
-core/logs/
-core/system_logs/
-*.log
 *.gguf
+*.dll
+*.so
+*.dylib
+*.log
+*.tmp
+*.bin
+*.exe
+
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+.env.*
+
+# Build / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# IDE / editor
+.vscode/
+.idea/
+*.code-workspace
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Logs & runtime artifacts
+logs/
+*.log
+*.tmp
+
+# Primus memory & runtime data (adjust paths if different)
+memory/
+**/memory_store*/
+**/sessions*/
+
+# Large model / RAG assets
+models/
+*.gguf
+*.bin
+*.pt
+*.onnx
+
+# Test / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local config / secrets (if you use these)
+config/local_*.json
+config/secrets/
+secrets/
