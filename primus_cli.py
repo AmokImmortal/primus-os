@@ -6,8 +6,7 @@ Top-level CLI for PRIMUS OS.
 
 Commands:
   - chat        : single-turn chat (RAG-aware via PrimusRuntime.chat_once)
-  - chat-rag    : alias for RAG-aware chat
-  - cl          : Captain's Log controls (write/read + enter/exit/status)
+  - cl          : Captain's Log controls (if available on core)
   - rag-index   : index a folder of documents into a named RAG index
   - rag-search  : search a named RAG index with a query
 """
@@ -32,12 +31,7 @@ logger = logging.getLogger("primus_cli")
 
 
 def cli_chat(args: argparse.Namespace) -> None:
-    runtime = PrimusRuntime()
-    reply = runtime.chat_once(args.message)
-    print(reply)
-
-
-def cli_chat_rag(args: argparse.Namespace) -> None:
+    """Single-turn chat via PrimusRuntime.chat_once()."""
     runtime = PrimusRuntime()
     reply = runtime.chat_once(args.message)
     print(reply)
@@ -49,18 +43,7 @@ def cli_chat_rag(args: argparse.Namespace) -> None:
 
 
 def cli_captains_log(args: argparse.Namespace) -> None:
-    """
-    Captain's Log wrapper.
-
-    Supports actions:
-      - write <text>
-      - read
-      - enter
-      - exit
-      - status
-
-    All actions are forwarded to core.captains_log(action, text).
-    """
+    """Simple Captain's Log write/read wrapper."""
     runtime = PrimusRuntime()
     core = runtime._ensure_core()  # type: ignore[attr-defined]
 
@@ -69,12 +52,8 @@ def cli_captains_log(args: argparse.Namespace) -> None:
         print("Captain's Log API is not available on PrimusCore.")
         return
 
-    action: str = args.action
-    text: str = getattr(args, "text", "") or ""
-
-    result = handler(action, text)
-    if result is not None:
-        print(result)
+    result = handler(args.action, args.text or "")
+    print(result)
 
 
 # --------------------------------------------------------------------------- #
@@ -83,11 +62,7 @@ def cli_captains_log(args: argparse.Namespace) -> None:
 
 
 def cli_rag_index(args: argparse.Namespace) -> None:
-    """
-    Index a path into a named RAG index.
-
-    Default index name is derived from the folder name if --name is not given.
-    """
+    """Index a path into a named RAG index."""
     runtime = PrimusRuntime()
     core = runtime._ensure_core()  # type: ignore[attr-defined]
 
@@ -104,9 +79,7 @@ def cli_rag_index(args: argparse.Namespace) -> None:
 
 
 def cli_rag_search(args: argparse.Namespace) -> None:
-    """
-    Search a named RAG index with a query.
-    """
+    """Search a named RAG index with a query."""
     runtime = PrimusRuntime()
     core = runtime._ensure_core()  # type: ignore[attr-defined]
 
@@ -138,16 +111,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # Captain's Log controls
-    p_cl = subparsers.add_parser("cl", help="Captain's Log Master Root Mode controls")
-    cl_sub = p_cl.add_subparsers(dest="cl_command", required=True)
-    cl_enter = cl_sub.add_parser("enter", help="Enter Captain's Log Master Root Mode")
-    cl_enter.set_defaults(func=cli_captains_log)
-    cl_exit = cl_sub.add_parser("exit", help="Exit Captain's Log Master Root Mode")
-    cl_exit.set_defaults(func=cli_captains_log)
-    cl_status = cl_sub.add_parser("status", help="Show Captain's Log status")
-    cl_status.set_defaults(func=cli_captains_log)
-
     # chat
     p_chat = subparsers.add_parser(
         "chat",
@@ -156,29 +119,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_chat.add_argument("message", help="User message to send to PRIMUS")
     p_chat.set_defaults(func=cli_chat)
 
-    # chat-rag (alias)
-    p_chat_rag = subparsers.add_parser(
-        "chat-rag",
-        help="Alias for RAG-aware chat (reserved for future advanced options)",
-    )
-    p_chat_rag.add_argument("message", help="User message to send to PRIMUS (RAG-aware)")
-    p_chat_rag.set_defaults(func=cli_chat_rag)
-
-    # Captain's Log (write/read + enter/exit/status)
+    # Captain's Log (simple write/read)
     p_cl = subparsers.add_parser(
         "cl",
         help="Captain's Log controls (if available on PrimusCore)",
     )
-    p_cl.add_argument(
-        "action",
-        choices=["write", "read", "enter", "exit", "status"],
-        help="Captain's Log action to perform",
-    )
+    p_cl.add_argument("action", choices=["write", "read"], help="Action to perform")
     p_cl.add_argument(
         "text",
         nargs="?",
         default="",
-        help="Text to write (for 'write'); ignored for other actions",
+        help="Text to write (for 'write' action); ignored for 'read'",
     )
     p_cl.set_defaults(func=cli_captains_log)
 
