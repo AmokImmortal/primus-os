@@ -338,6 +338,7 @@ class PrimusRuntime:
         # existing code...
 
         # Preferred: PrimusCore.chat_once API
+        core = self._ensure_core()
         chat_fn = getattr(core, "chat_once", None)
         if callable(chat_fn):
             logger.info("chat_once: delegating to PrimusCore.chat_once (len=%d)", len(user_message))
