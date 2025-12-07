@@ -10,7 +10,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from core.primus_core import PrimusCore, get_primus_core
+from core.primus_core import PrimusCore
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +20,6 @@ _core_initialized = False
 
 def _ensure_core_initialized() -> PrimusCore:
     global _core_initialized
-    core = get_primus_core(singleton=True)
     if not _core_initialized:
         try:
             core.initialize()
@@ -78,4 +77,4 @@ def rag_retrieve(index: str, query: str, top_k: int = 5) -> List[Dict[str, Any]]
     return hits if isinstance(hits, list) else []
 
 
-__all__ = ["rag_index_path", "rag_retrieve", "get_primus_core", "PrimusCore"]
+__all__ = ["rag_index_path", "rag_retrieve", "PrimusCore"]
