@@ -603,6 +603,111 @@ class PrimusCore:
         return status
 
     # -------------------------
+    # Chat APIs (unified entrypoint)
+    # -------------------------
+    def chat(
+        self,
+        user_message: str,
+        session_id: Optional[str] = None,
+        use_rag: bool = False,
+        index_name: Optional[str] = None,
+        max_tokens: int = 256,
+    ) -> Dict[str, Any]:
+        """
+        Unified chat entrypoint for PrimusCore.
+
+        - Loads or creates a session through SessionManager when available.
+        - Optionally performs RAG retrieval when requested and an index is provided.
+        - Sends the composed prompt to the model backend via ModelManager.
+        """
+
+        if not self.model_manager:
+            raise RuntimeError("ModelManager not initialized; cannot generate responses.")
+        if not self.session_manager:
+            raise RuntimeError("SessionManager not initialized; sessions unavailable.")
+
+        # Session handling
+        session_ref: Optional[Dict[str, Any]] = None
+        active_session_id: Optional[str] = session_id
+        try:
+            if session_id:
+                try:
+                    session_ref = self.session_manager.load_session(session_id)
+                except Exception:
+                    # If explicit session_id provided but missing, create a new one
+                    session_ref = self.session_manager.create_session(title=f"Session {session_id}")
+                    active_session_id = session_ref.get("id")
+            else:
+                session_ref = self.session_manager.create_session(title="Ad-hoc session")
+                active_session_id = session_ref.get("id")
+        except Exception as exc:
+            logger.exception("Session handling failed")
+            raise RuntimeError(f"Session handling failed: {exc}") from exc
+
+        retrieved_snippets: List[str] = []
+        if use_rag and index_name and self.rag and hasattr(self.rag, "search"):
+            try:
+                hits = self.rag.search(query=user_message, scope=index_name, topk=5)
+                for hit in hits:
+                    preview = hit.get("preview") or hit.get("metadata", {}).get("text")
+                    if preview:
+                        retrieved_snippets.append(str(preview))
+            except Exception:
+                logger.exception("RAG retrieval failed; continuing without context")
+
+        prompt_parts = []
+        if retrieved_snippets:
+            prompt_parts.append("Relevant context:\n" + "\n".join(f"- {s}" for s in retrieved_snippets))
+        prompt_parts.append(f"User: {user_message}")
+        prompt_parts.append("PRIMUS:")
+        prompt = "\n\n".join(prompt_parts)
+
+        try:
+            reply_text = self.model_manager.generate(prompt, max_tokens=max_tokens)
+        except Exception as exc:
+            logger.exception("Model generation failed")
+            raise RuntimeError(f"Model generation failed: {exc}") from exc
+
+        # Persist messages to session when possible
+        try:
+            if session_ref and active_session_id:
+                self.session_manager.add_message(active_session_id, role="user", who="user", text=user_message)
+                self.session_manager.add_message(active_session_id, role="agent", who="PRIMUS", text=reply_text)
+        except Exception:
+            logger.exception("Failed to record chat messages to session")
+
+        return {
+            "status": "ok",
+            "session_id": active_session_id,
+            "response": reply_text,
+            "context_used": bool(retrieved_snippets),
+        }
+
+    def chat_once(
+        self,
+        user_message: str,
+        use_rag: bool = True,
+        index_name: str = "docs",
+        max_tokens: int = 256,
+    ) -> str:
+        """
+        Convenience wrapper for single-turn chats.
+        """
+
+        # Default to using the "docs" index when RAG is available; otherwise fall back gracefully.
+        resolved_use_rag = use_rag and self.rag is not None
+        resolved_index = index_name if resolved_use_rag else None
+
+        result = self.chat(
+            user_message=user_message,
+            session_id=None,
+            use_rag=resolved_use_rag,
+            index_name=resolved_index,
+            max_tokens=max_tokens,
+        )
+        return result.get("response", "")
+
+    # -------------------------
     # Simple helper: allow an agent to request a RAG search across allowed scopes
     # -------------------------
     def agent_search(self, agent_name: str, query: str, topk: int = 5) -> Dict[str, Any]:
