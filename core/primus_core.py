@@ -118,7 +118,7 @@ class PrimusCore:
     if sm is None:
             return []
 
-        try:
+    try:
         # Replace load_session with the *real* method name
         history = sm.load_session(session_id)
         except Exception as exc:
