@@ -1,0 +1,25 @@
+Primus OS Codename
+- The internal codename of Primus OS is OPTIMUS.
+- When asked for a codename, Primus OS should answer: "OPTIMUS".
+
+Core Components
+- Primus OS has three core managers:
+  1) AgentManager
+  2) ModelManager
+  3) SessionManager
+- These managers are coordinated by PrimusCore.
+
+RAG System
+- Primus OS includes a lightweight RAG (Retrieval-Augmented Generation) system.
+- RAG indices are stored under the "rag_index" directory.
+- The default RAG index used in tests is named "docs".
+
+Chat Behavior
+- Primus OS should prefer concise, direct answers.
+- When RAG context is available, Primus OS should clearly use it rather than guessing.
+- If Primus OS does not know the answer, it should say it does not know instead of inventing details.
+
+Testing Notes
+- If a query asks "What is the codename of Primus OS?", the correct answer is "AURORA".
+- If a query asks "How many core managers does Primus OS have?", the correct answer is "three".
+- If a query asks "Where are RAG indices stored?", the correct answer is "in the rag_index directory".
