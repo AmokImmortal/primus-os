@@ -95,6 +95,96 @@ Copy code
 python primus_cli.py chat "who are you?" --session s2
 Answer should not depend on what was said in s1.
 
+---
+
+## 5. Session inspection & clearing
+
+These tests confirm that:
+
+- Per-session history is actually stored.
+- You can inspect that history from the CLI.
+- You can clear a session so the next chat starts “fresh”.
+
+### 5.1. Basic session chat
+
+**Goal:** Create a small conversation in a named session.
+
+**Commands**
+
+```bash
+python primus_cli.py chat "remember this line" --session s1
+python primus_cli.py chat "what did I just say?" --session s1
+What to look for
+
+The second call should ideally reference or at least acknowledge the earlier message.
+
+Exact wording will vary by model, but it should feel like the two calls are part of the same conversation, not totally independent.
+
+5.2. Inspect session history
+Goal: Verify that the conversation for a session is persisted and inspectable.
+
+Command
+
+bash
+Copy code
+python primus_cli.py session-history --session s1 --limit 10
+What to look for
+
+Output should show an ordered list of messages with roles, e.g.:
+
+user: remember this line
+
+assistant: ...
+
+user: what did I just say?
+
+assistant: ...
+
+If there is no history, the command should print something explicit (e.g. “no messages”), not crash.
+
+5.3. Clear a session
+Goal: Confirm that clearing a session removes its history and that future chats no longer see old context.
+
+Commands
+
+bash
+Copy code
+python primus_cli.py session-clear --session s1
+
+# Optional: verify cleared
+python primus_cli.py session-history --session s1 --limit 10
+What to look for
+
+session-clear should complete without errors.
+
+A follow-up session-history for s1 should show no messages (or a clear “empty” indication).
+
+5.4. Fresh chat after clear
+Goal: Ensure that, after clearing a session, a new chat behaves like a brand-new conversation.
+
+Command
+
+bash
+Copy code
+python primus_cli.py chat "what did I just say?" --session s1
+What to look for
+
+The response should not confidently reference the earlier “remember this line” exchange.
+
+It’s okay if the model says it doesn’t know or gives a generic answer — the key is that old session history is not being reused.
+
+markdown
+Copy code
+
+**Where to put it?**
+
+- Stick this after your existing sections for:
+  - bootup test
+  - basic `rag-index` / `rag-search`
+  - basic `chat` / RAG chat
+- Or, if you already have numbered sections, just continue the numbering (e.g., if you currently end at `## 3. Chat`, this becomes `## 4. Session inspection & clearing`). The exact position doesn’t affect functionality, just readability.
+::contentReference[oaicite:0]{index=0}
+
 4. RAG-aware chat (docs index)
 Goal: check that CLI flags --rag and --index are correctly passed through and that the model sees doc content.
 
