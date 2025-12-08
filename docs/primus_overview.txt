@@ -1,8 +1,0 @@
-PRIMUS OS is a local-first AI system focused on privacy, offline capability, and modular agents.
-PrimusCore is the orchestration core that wires the model backend, sessions, and RAG together.
-The ModelManager wraps llama.cpp GGUF models for offline text generation.
-The SessionManager records multi-turn conversations when a session ID is provided.
-Captain's Log Master Root Mode is isolated and private, used for secure journaling and diagnostics.
-A SecurityGate layer reports whether network access should be allowed when Captain's Log is active.
-RAG supports indexing your docs folder into searchable vectors for contextual answers.
-Bootup self-tests confirm the runtime, model backend, and RAG wiring are operational.
