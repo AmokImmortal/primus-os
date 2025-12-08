@@ -108,22 +108,24 @@ class PrimusCore:
     # Session-aware + RAG-aware chat                                     #
     # ------------------------------------------------------------------ #
 
-    def _load_history(self, session_id: str) -> List[Dict[str, str]]:
+    def _load_history(self, session_id: str) -> list[dict]:
         """
         Helper to load a session history from SessionManager, if available.
 
         Expected shape: list of {'role': 'user'|'assistant', 'content': str}
         """
-        sm = self.session_manager
-        load_fn = getattr(sm, "load_session", None)
-        if callable(load_fn):
-            try:
-                history = load_fn(session_id)
-                if isinstance(history, list):
-                    return history
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Failed to load session %r: %s", session_id, exc)
-        return []
+       sm = getattr(self, "session_manager", None)
+        if sm is None:
+            return []
+
+        try:
+        # Replace load_session with the *real* method name
+        history = sm.load_session(session_id)
+        except Exception as exc:
+            logger.warning("load_history failed for %r: %s", session_id, exc)
+            return []
+
+            return history or []
 
     def _append_message(self, session_id: str, role: str, content: str) -> None:
         """
