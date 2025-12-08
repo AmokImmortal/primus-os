@@ -115,7 +115,7 @@ class PrimusCore:
         Expected shape: list of {'role': 'user'|'assistant', 'content': str}
         """
     sm = getattr(self, "session_manager", None)
-        if sm is None:
+    if sm is None:
             return []
 
         try:
