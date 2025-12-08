@@ -29,6 +29,42 @@ logger = logging.getLogger("primus_cli")
 # Command: chat (session-aware, optional RAG)                                 #
 # --------------------------------------------------------------------------- #
 
+def cli_session_history(args: argparse.Namespace) -> None:
+    """Show recent messages for a given session."""
+    runtime = PrimusRuntime()
+    core = runtime._ensure_core()  # type: ignore[attr-defined]
+
+    history = getattr(core, "get_session_history", None)
+    if not callable(history):
+        print("Session history API is not available on PrimusCore.")
+        return
+
+    messages = history(args.session, limit=args.limit)
+    if not messages:
+        print(f"No history found for session {args.session!r}.")
+        return
+
+    print(f"Session: {args.session} (showing up to {len(messages)} messages)")
+    for idx, msg in enumerate(messages, start=1):
+        role = msg.get("role", "user")
+        content = msg.get("content", "").strip()
+        if not content:
+            continue
+        print(f"{idx:02d}) {role:9}: {content}")
+
+
+def cli_session_clear(args: argparse.Namespace) -> None:
+    """Clear all messages for a given session."""
+    runtime = PrimusRuntime()
+    core = runtime._ensure_core()  # type: ignore[attr-defined]
+
+    clearer = getattr(core, "clear_session", None)
+    if not callable(clearer):
+        print("Session clear API is not available on PrimusCore.")
+        return
+
+    clearer(args.session)
+    print(f"Cleared session {args.session!r}.")
 
 def cli_chat(args: argparse.Namespace) -> None:
     """
@@ -221,6 +257,36 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_search.set_defaults(func=cli_rag_search)
 
+    # session-history
+    p_hist = subparsers.add_parser(
+        "session-history",
+        help="Show recent messages for a given session",
+    )
+    p_hist.add_argument(
+        "--session",
+        required=True,
+        help="Session ID to inspect",
+    )
+    p_hist.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="Maximum number of messages to show (default: 20)",
+    )
+    p_hist.set_defaults(func=cli_session_history)
+
+    # session-clear
+    p_clear = subparsers.add_parser(
+        "session-clear",
+        help="Clear all messages for a given session",
+    )
+    p_clear.add_argument(
+        "--session",
+        required=True,
+        help="Session ID to clear",
+    )
+    p_clear.set_defaults(func=cli_session_clear)
+  
     return parser
 
 
