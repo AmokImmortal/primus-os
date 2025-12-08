@@ -1,10 +1,3 @@
-"""
-RAG retriever for PRIMUS OS.
-
-Loads chunked JSON indexes produced by rag.indexer, embeds queries with the
-same deterministic hash embedder, scores documents, and returns the best
-matching chunks.
-"""
 from __future__ import annotations
 
 import json
@@ -13,94 +6,122 @@ import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from rag.indexer import HashEmbedder
+from rag.embedder import RAGEmbedder, get_embedder
 
 logger = logging.getLogger(__name__)
 
 
 class RAGRetriever:
-    """Retrieve relevant chunks from a named RAG index."""
+    """
+    Simple RAG retriever that scores stored document vectors against a
+    query embedding using cosine similarity.
+    """
 
-    def __init__(self, index_dir: Optional[Path] = None):
-        self.index_dir = index_dir or Path(__file__).resolve().parent / "indexes"
-        self.embedder = HashEmbedder()
+    def __init__(self, index_root: str | Path = "rag_index", embedder: Optional[RAGEmbedder] = None) -> None:
+        self.index_root = Path(index_root)
+        self.index_root.mkdir(parents=True, exist_ok=True)
+        self.embedder: RAGEmbedder = embedder or get_embedder()
 
-    def retrieve(self, name: str, query: str, top_k: int = 3) -> List[Tuple[float, Dict[str, Any]]]:
-        """Return top_k (score, doc) pairs for the provided query and index name."""
+    # ------------------------------------------------------------------ #
+    # Index loading helpers                                              #
+    # ------------------------------------------------------------------ #
 
-        index_data = self._load_index(name)
-        if not index_data:
-            return []
+    def _index_path(self, name: str) -> Path:
+        return self.index_root / f"{name}.json"
 
-        documents: List[Dict[str, Any]] = index_data.get("documents", []) or []
-        vectors: List[List[float]] = index_data.get("vectors", []) or []
-        candidate_count = min(len(documents), len(vectors))
-        if candidate_count == 0:
-            logger.info("RAGRetriever.retrieve: index='%s' has no documents", name)
-            return []
-
-        logger.info(
-            "RAGRetriever.retrieve: index='%s' query_len=%d candidates=%d",
-            name,
-            len(query or ""),
-            candidate_count,
-        )
-
-        query_vec = self.embedder.embed_batch([query or ""])[0]
-
-        scored: List[Tuple[float, Dict[str, Any]]] = []
-        seen = set()
-
-        for doc, vec in zip(documents[:candidate_count], vectors[:candidate_count]):
-            path = doc.get("path")
-            chunk_id = doc.get("chunk_id")
-            text = doc.get("text", "")
-            key = (path, chunk_id if chunk_id is not None else text)
-            if key in seen:
-                continue
-            seen.add(key)
-
-            score = self._cosine_similarity(query_vec, vec)
-            scored.append((score, doc))
-
-        scored.sort(key=lambda item: item[0], reverse=True)
-        limited = scored[: top_k if top_k is not None else len(scored)]
-        logger.info(
-            "RAGRetriever.retrieve: returning %d results (top_k=%s)",
-            len(limited),
-            top_k,
-        )
-        return limited
-
-    # --------------------
-    # Internal helpers
-    # --------------------
     def _load_index(self, name: str) -> Optional[Dict[str, Any]]:
-        path = self.index_dir / f"{name}.index.json"
+        """
+        Load an index file created by RAGIndexer.
+
+        Expected structure:
+        {
+            "documents": [ { "path": str, "text": str }, ... ],
+            "vectors":   [ [float, float, ...], ... ]
+        }
+        """
+        path = self._index_path(name)
         if not path.exists():
-            logger.warning("RAGRetriever: index not found: %s", path)
+            logger.warning("RAGRetriever: index '%s' not found at %s", name, path)
             return None
 
         try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            logger.exception("RAGRetriever: failed to load index %s", path)
+            with path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "RAGRetriever: failed to load index '%s' from %s: %s",
+                name,
+                path,
+                exc,
+            )
             return None
 
-    def _cosine_similarity(self, a: List[float], b: List[float]) -> float:
-        if not a or not b:
+        docs = data.get("documents") or []
+        vecs = data.get("vectors") or []
+        if len(docs) != len(vecs):
+            logger.warning(
+                "RAGRetriever: index '%s' has mismatched docs (%d) and vectors (%d)",
+                name,
+                len(docs),
+                len(vecs),
+            )
+
+        return {"documents": docs, "vectors": vecs}
+
+    # ------------------------------------------------------------------ #
+    # Similarity                                                         #
+    # ------------------------------------------------------------------ #
+
+    @staticmethod
+    def _cosine_similarity(v1: List[float], v2: List[float]) -> float:
+        if not v1 or not v2 or len(v1) != len(v2):
             return 0.0
-        dot = sum(x * y for x, y in zip(a, b))
-        norm_a = math.sqrt(sum(x * x for x in a))
-        norm_b = math.sqrt(sum(y * y for y in b))
-        if norm_a == 0.0 or norm_b == 0.0:
+
+        dot = 0.0
+        mag1 = 0.0
+        mag2 = 0.0
+
+        for a, b in zip(v1, v2):
+            dot += a * b
+            mag1 += a * a
+            mag2 += b * b
+
+        if mag1 <= 0.0 or mag2 <= 0.0:
             return 0.0
-        return float(dot / (norm_a * norm_b))
+
+        return dot / (math.sqrt(mag1) * math.sqrt(mag2))
+
+    # ------------------------------------------------------------------ #
+    # Public API                                                         #
+    # ------------------------------------------------------------------ #
+
+    def retrieve(self, name: str, query: str, top_k: int = 3) -> List[Tuple[float, Dict[str, Any]]]:
+        """
+        Retrieve the top_k most similar documents from the given index.
+
+        Returns a list of (score, document_dict) tuples.
+        """
+        index = self._load_index(name)
+        if not index:
+            logger.info("RAGRetriever: index '%s' is empty or missing; no results.", name)
+            return []
+
+        documents: List[Dict[str, Any]] = index["documents"]
+        vectors: List[List[float]] = index["vectors"]
+
+        query_vec = self.embedder.embed_text(query)
+        scored: List[Tuple[float, Dict[str, Any]]] = []
+
+        for doc, vec in zip(documents, vectors):
+            score = self._cosine_similarity(query_vec, vec)
+            scored.append((score, doc))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        if top_k > 0:
+            scored = scored[:top_k]
+
+        return scored
 
 
-def get_retriever() -> RAGRetriever:
-    return RAGRetriever()
-
-
-__all__ = ["RAGRetriever", "get_retriever"]
+__all__ = ["RAGRetriever"]
