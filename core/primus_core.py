@@ -115,6 +115,57 @@ class PrimusCore:
         except Exception as exc:  # noqa: BLE001
             logger.warning("append_message failed for %r: %s", session_id, exc)
 
+     def rag_index_path(self, name: str, path: str | "Path", recursive: bool = False) -> None:
+        """
+        Public helper to index a path into a named RAG index.
+
+        Thin wrapper around the underlying RAG indexer / manager so that
+        the CLI can call PrimusCore.rag_index_path(...) directly.
+        """
+        from pathlib import Path as _Path
+
+        path_str = str(_Path(path))
+
+        logger.info(
+            "RAG index request: name=%r path=%r recursive=%s",
+            name,
+            path_str,
+            recursive,
+        )
+
+        # Prefer a rag_manager if it exists and exposes index_path
+        rm = getattr(self, "rag_manager", None)
+        if rm is not None and hasattr(rm, "index_path"):
+            rm.index_path(name=name, path=path_str, recursive=recursive)
+            return
+
+        # Fallback: use the low-level indexer
+        if hasattr(self, "rag_indexer"):
+            self.rag_indexer.index_path(name=name, path=path_str, recursive=recursive)
+
+    def rag_retrieve(self, name: str, query: str, top_k: int = 3) -> List[Tuple[float, Dict[str, Any]]]:
+        """
+        Public helper to retrieve top-k documents from a named RAG index.
+
+        Thin wrapper around the underlying RAG retriever / manager so that
+        the CLI can call PrimusCore.rag_retrieve(...) directly.
+        """
+        logger.info(
+            "RAG retrieve request: index=%r query_len=%d top_k=%d",
+            name,
+            len(query),
+            top_k,
+        )
+
+        rm = getattr(self, "rag_manager", None)
+        if rm is not None and hasattr(rm, "retrieve"):
+            return rm.retrieve(name=name, query=query, top_k=top_k)
+
+        if hasattr(self, "rag_retriever"):
+            return self.rag_retriever.retrieve(name=name, query=query, top_k=top_k)
+
+        return []
+    
     def _build_rag_context(
         self,
         rag_index: str,
