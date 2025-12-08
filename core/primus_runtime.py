@@ -99,6 +99,10 @@ SYSTEM_DIR = SYSTEM_ROOT / "System"
 if SYSTEM_DIR.exists() and str(SYSTEM_DIR) not in sys.path:
     sys.path.insert(0, str(SYSTEM_DIR))
 
+SYSTEM_DIR = SYSTEM_ROOT / "System"
+if SYSTEM_DIR.exists() and str(SYSTEM_DIR) not in sys.path:
+    sys.path.insert(0, str(SYSTEM_DIR))
+
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
@@ -130,6 +134,20 @@ except Exception as exc:  # noqa: BLE001
     logger.warning("PrimusCore import failed in primus_runtime: %s", exc)
 
 # Security layer (optional)
+try:
+    from captains_log.cl_manager import CaptainsLogManager, get_manager as get_captains_log_manager
+except Exception:
+    CaptainsLogManager = None
+    get_captains_log_manager = None
+    logger.warning("captains_log.cl_manager not available; Captain's Log manager unavailable.")
+
+try:
+    from core.security_gate import SecurityGate, get_security_gate
+except Exception:
+    SecurityGate = None
+    get_security_gate = None
+    logger.warning("core.security_gate not available; SecurityGate unavailable.")
+
 try:
     from captains_log.cl_manager import CaptainsLogManager, get_manager as get_captains_log_manager
 except Exception:
