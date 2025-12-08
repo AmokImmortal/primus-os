@@ -21,6 +21,7 @@ import logging
 import os
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple
 
@@ -88,9 +89,10 @@ except Exception:
     logger.warning("MemoryManager not available; memory features will be limited.")
 
 try:
-    from core.session_manager import SessionManager
+    from core.session_manager import SessionManager, SessionNotFound
 except Exception:
     SessionManager = None
+    SessionNotFound = None  # type: ignore
     logger.warning("SessionManager not available; sessions will be limited.")
 
 
@@ -601,6 +603,285 @@ class PrimusCore:
         }
         logger.debug("Status requested: %s", status)
         return status
+
+    # -------------------------
+    # Chat APIs (unified entrypoint)
+    # -------------------------
+    def chat(
+        self,
+        user_message: str,
+        session_id: Optional[str] = None,
+        use_rag: bool = False,
+        rag_index: Optional[str] = None,
+        max_tokens: int = 256,
+    ) -> str:
+        """
+        Unified chat entrypoint for PrimusCore with optional session history and RAG context.
+
+        The method centralizes chat behavior for all front-ends by:
+        - loading prior turns when a session id is supplied (creating the session skeleton if
+          missing),
+        - optionally retrieving RAG snippets when `use_rag` and `rag_index` are provided,
+        - building a single prompt that includes a short system primer, optional RAG context,
+          any conversation history, and the latest user message,
+        - delegating response generation to the configured ModelManager, and
+        - persisting the new turn back into the session when a session id is in use.
+        """
+
+        if not self.model_manager:
+            raise RuntimeError("ModelManager not initialized; cannot generate responses.")
+
+        history: List[Dict[str, Any]] = []
+        active_session_id: Optional[str] = None
+
+        if session_id:
+            if not self.session_manager:
+                raise RuntimeError("SessionManager not initialized; session-based chat unavailable.")
+            active_session_id, history = self._load_or_initialize_session(session_id)
+
+        rag_snippets = self._retrieve_rag_context(user_message, use_rag=use_rag, rag_index=rag_index)
+        prompt = self._build_prompt(user_message, history, rag_snippets)
+
+        try:
+            reply_text = self.model_manager.generate(prompt, max_tokens=max_tokens)
+        except Exception as exc:
+            logger.exception("Model generation failed")
+            raise RuntimeError(f"Model generation failed: {exc}") from exc
+
+        if self.session_manager and active_session_id:
+            self._append_message(active_session_id, role="user", who="user", text=user_message)
+            self._append_message(active_session_id, role="agent", who="PRIMUS", text=reply_text)
+
+        return reply_text
+
+    def chat_once(
+        self,
+        user_message: str,
+        session_id: Optional[str] = None,
+        use_rag: bool = False,
+        rag_index: Optional[str] = None,
+        max_tokens: int = 256,
+    ) -> str:
+        """
+        Convenience wrapper primarily used by PrimusRuntime for single-turn chats. Delegates to
+        :meth:`chat` without adding extra logic.
+        """
+        return self.chat(
+            user_message=user_message,
+            session_id=session_id,
+            use_rag=use_rag,
+            rag_index=rag_index,
+            max_tokens=max_tokens,
+        )
+
+    def _retrieve_rag_context(
+        self,
+        query: str,
+        use_rag: bool,
+        rag_index: Optional[str],
+        topk: int = 3,
+    ) -> List[Tuple[str, str]]:
+        """Retrieve lightweight RAG snippets when enabled and available."""
+
+        if not (use_rag and rag_index and self.rag and hasattr(self.rag, "search")):
+            return []
+
+        snippets: List[Tuple[str, str]] = []
+        try:
+            hits = self.rag.search(query=query, scope=rag_index, topk=topk)
+            for hit in hits:
+                metadata = hit.get("metadata", {}) if isinstance(hit, dict) else {}
+                path = metadata.get("path") or metadata.get("source_file") or metadata.get("source") or rag_index
+                text = metadata.get("text") or hit.get("preview") or hit.get("text") or ""
+                preview = text[:240] + ("..." if len(text) > 240 else "")
+                score_val = hit.get("score") if isinstance(hit, dict) else None
+                score_val = score_val if score_val is not None else hit.get("distance") if isinstance(hit, dict) else None
+                score = f"{score_val:.4f}" if isinstance(score_val, (int, float)) else "?"
+                snippets.append((score, f"{path}: {preview}"))
+        except Exception:
+            logger.warning("RAG retrieval failed or index missing; proceeding without context.", exc_info=True)
+
+        return snippets
+
+    def _build_prompt(
+        self,
+        user_message: str,
+        history: List[Dict[str, Any]],
+        rag_snippets: List[Tuple[str, str]],
+    ) -> str:
+        """Compose the final prompt with system primer, optional context, and history."""
+
+        prompt_parts: List[str] = []
+        prompt_parts.append(
+            "System: You are PRIMUS, the local-first assistant for PRIMUS OS. Respond concisely, "
+            "accurately, and respect privacy constraints."
+        )
+
+        if rag_snippets:
+            rag_block_lines = ["RAG CONTEXT:"]
+            for score, snippet in rag_snippets:
+                rag_block_lines.append(f"- [score={score}] {snippet}")
+            prompt_parts.append("\n".join(rag_block_lines))
+
+        if history:
+            history_lines: List[str] = []
+            for msg in history:
+                role = msg.get("role", "user").lower()
+                who = msg.get("who", role)
+                text = msg.get("text", "")
+                label = "User" if role == "user" else "Assistant"
+                history_lines.append(f"{label} ({who}): {text}")
+            prompt_parts.append("Conversation history:\n" + "\n".join(history_lines))
+
+        prompt_parts.append(f"User: {user_message}")
+        prompt_parts.append("Assistant:")
+        return "\n\n".join(prompt_parts)
+
+    def _load_or_initialize_session(self, session_id: str) -> Tuple[str, List[Dict[str, Any]]]:
+        """Load session history or create a new session when missing using SessionManager."""
+
+        if not self.session_manager:
+            raise RuntimeError("SessionManager not initialized")
+
+        try:
+            session_ref = self.session_manager.load_session(session_id)
+            history = list(session_ref.get("messages", [])) if isinstance(session_ref, dict) else []
+            active_session_id = session_ref.get("id", session_id) if isinstance(session_ref, dict) else session_id
+            return active_session_id, history
+        except Exception as exc:
+            should_init = SessionNotFound is None or isinstance(exc, SessionNotFound)
+            if not should_init:
+                logger.exception("Failed to load session %s; continuing without history.", session_id)
+                return session_id, []
+
+        try:
+            if hasattr(self.session_manager, "create_session"):
+                session_ref = self.session_manager.create_session(title=session_id, owner="user", privacy="private")
+                session_id_resolved = session_ref.get("id", session_id) if isinstance(session_ref, dict) else session_id
+                return session_id_resolved, []
+        except Exception:
+            logger.exception("Failed to initialize new session %s", session_id)
+
+        return session_id, []
+
+    def _load_history(self, session_id: str) -> List[Dict[str, Any]]:
+        """Load stored messages for a session via the SessionManager."""
+
+        if not self.session_manager:
+            return []
+
+        try:
+            if hasattr(self.session_manager, "get_messages"):
+                return list(self.session_manager.get_messages(session_id))
+
+            session_ref = self.session_manager.load_session(session_id)
+            return list(session_ref.get("messages", [])) if isinstance(session_ref, dict) else []
+        except Exception as exc:
+            if SessionNotFound and isinstance(exc, SessionNotFound):
+                logger.info("Loaded session history for %r (len=%d)", session_id, 0)
+                return []
+            logger.warning("Failed to load session history for %r", session_id, exc_info=True)
+            return []
+
+    def _append_message(self, session_id: str, role: str, who: str, text: str) -> None:
+        """Persist a message to the SessionManager when available."""
+
+        if not self.session_manager:
+            return
+
+        try:
+            if hasattr(self.session_manager, "add_message"):
+                self.session_manager.add_message(session_id, role=role, who=who, text=text)
+        except Exception:
+            logger.warning("Failed to append message for session %s", session_id, exc_info=True)
+
+    def list_sessions(self) -> List[str]:
+        """
+        Return a sorted list of known session IDs.
+        """
+
+        if not self.session_manager:
+            return []
+
+        sessions: List[str] = []
+        try:
+            if hasattr(self.session_manager, "list_sessions"):
+                raw_sessions = self.session_manager.list_sessions()
+                for entry in raw_sessions:
+                    if isinstance(entry, dict):
+                        sid = entry.get("id")
+                        if sid:
+                            sessions.append(str(sid))
+                    elif isinstance(entry, str):
+                        sessions.append(entry)
+            else:
+                session_dir = self.system_root / "system" / "sessions"
+                if session_dir.exists():
+                    sessions = [p.stem for p in session_dir.glob("*.json") if p.is_file()]
+        except Exception:
+            logger.exception("Failed to list sessions.")
+            return []
+
+        sessions = sorted(set(sessions))
+        logger.info("Listing sessions: %r", sessions)
+        return sessions
+
+    def get_session_history(self, session_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+        """
+        Return chat history for a session as a list of message dicts like
+        {"role": "user"|"assistant", "content": "..."}.
+
+        If limit is set, return only the most recent N messages.
+        """
+
+        messages = self._load_history(session_id)
+
+        if limit is not None:
+            messages = messages[-limit:]
+
+        history = [
+            {"role": msg.get("role", "user"), "content": msg.get("text", "")}
+            for msg in messages
+            if isinstance(msg, dict)
+        ]
+        logger.info("Loaded session history for %r (len=%d)", session_id, len(history))
+        return history
+
+    def clear_session(self, session_id: str) -> None:
+        """
+        Delete/clear all history for the given session ID.
+
+        If the session does not exist, this is a no-op.
+        """
+
+        if not self.session_manager:
+            logger.info("No session manager available; nothing to clear for %r", session_id)
+            return
+
+        cleared = False
+        try:
+            known_sessions = set(self.list_sessions())
+            if session_id in known_sessions and hasattr(self.session_manager, "delete_session"):
+                self.session_manager.delete_session(session_id)
+                cleared = True
+            else:
+                session_path = self.system_root / "system" / "sessions" / f"{session_id}.json"
+                if session_path.exists():
+                    session_path.unlink()
+                    if hasattr(self.session_manager, "_cache") and session_id in getattr(self.session_manager, "_cache", {}):
+                        try:
+                            del self.session_manager._cache[session_id]
+                        except Exception:
+                            logger.debug("Failed to evict %r from session cache", session_id)
+                    cleared = True
+        except Exception:
+            logger.exception("Failed to clear session %r", session_id)
+            return
+
+        if cleared:
+            logger.info("Cleared session %r", session_id)
+        else:
+            logger.info("No session %r to clear", session_id)
 
     # -------------------------
     # Simple helper: allow an agent to request a RAG search across allowed scopes
