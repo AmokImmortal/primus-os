@@ -1,165 +1,183 @@
-# PRIMUS OS – CLI Smoke Tests
+# CLI Smoke Tests for Primus OS
 
-Quick checks to confirm that the core pieces of PRIMUS OS are wired up correctly.
+This file describes quick, manual checks to verify that the **CLI + runtime + RAG** wiring is still healthy.
 
-> These tests assume:
-> - You are in the `C:\P.R.I.M.U.S OS\System` directory.
-> - Your virtualenv is active (`(venv)`).
-> - `PRIMUS_MODEL_PATH` is set to your GGUF model.
+These are **smoke tests**, not exhaustive tests. Run them after significant changes to:
+
+- `primus_cli.py`
+- `core/primus_runtime.py`
+- `core/primus_core.py`
+- RAG-related code (`rag/`, `core/rag_manager.py`, etc.)
 
 ---
 
-## 1. Bootup & core health
+## 0. Environment sanity
 
-**Command**
+From the project root (where `primus_cli.py` lives):
 
 ```bash
+python -m py_compile core/primus_core.py core/primus_runtime.py primus_cli.py
 python core/primus_runtime.py --run-bootup-test
-Expected
+Expected:
 
-No Python tracebacks.
+No SyntaxError or ImportError.
 
-Final lines include:
+Bootup test ends with:
 
 Core self-test : COMPLETED (see logs for details)
 
 Bootup Test : ALL CHECKS PASSED.
 
-If this fails, fix core issues before running anything else.
-
-2. RAG indexing
-2.1 Index the docs folder
-Command
+1. RAG indexing + search (docs index)
+Run:
 
 bash
 Copy code
 python primus_cli.py rag-index docs --recursive
-Expected
+Expected:
 
-No tracebacks.
-
-Logs show RAG initialization.
-
-Final line similar to:
+Log lines showing PrimusCore initialize and a final line like:
 
 text
 Copy code
 [OK] Indexed 'C:\P.R.I.M.U.S OS\System\docs' as index 'docs'
-If this fails, check that docs/ exists and that rag/indexer.py is importable.
-
-3. RAG retrieval (hash-mock sanity checks)
-Note: the current embedder is hash-based (“hash-mock”) and not truly semantic.
-These tests only verify that the pipeline returns scored documents, not that it always picks the “best” one.
-
-3.1 Primus codename
-Command
+Then:
 
 bash
 Copy code
-python primus_cli.py rag-search docs "What is the Primus OS codename?"
-Expected
+python primus_cli.py rag-search docs "smoke test"
+Expected:
 
-No tracebacks.
+No traceback.
 
-1–3 lines of output like:
+A few scored lines like:
 
 text
 Copy code
-[0.xxxx] C:\P.R.I.M.U.S OS\System\docs\some_file.txt
-At least one of the results should be a real file under docs\.
+[0.1234] C:\P.R.I.M.U.S OS\System\docs\some_file.txt
+You don’t care about the exact scores, only that results are returned and the command succeeds.
 
-3.2 Captain’s Log purpose
-Command
-
-bash
-Copy code
-python primus_cli.py rag-search docs "What is Captain's Log for?"
-Expected
-
-Same as above: no errors, 1–3 scored paths.
-
-One of the results is often rag_test_captains_log.txt (but ranking is not guaranteed with hash-mock).
-
-3.3 Decoy note query
-Command
-
-bash
-Copy code
-python primus_cli.py rag-search docs "What kind of facts are in the decoy note?"
-Expected
-
-No tracebacks.
-
-Top result is usually rag_test_decoy.txt.
-
-Confirms the pipeline can retrieve that file when the query clearly overlaps its content.
-
-4. Basic chat (CLI)
-4.1 Single-turn chat
-Command
+2. Basic chat via CLI (no session flags)
+Run:
 
 bash
 Copy code
 python primus_cli.py chat "hello"
-Expected
+Expected:
 
-No tracebacks.
+No traceback.
 
-A short assistant reply (1–3 sentences).
+A natural-language reply from the model.
 
-Console logs show:
+Logging shows PrimusRuntime and PrimusCore initializing once, then a single chat completion.
 
-PrimusRuntime initialized.
+This is the baseline “single-turn chat still works” check.
 
-Calls into the model backend (ModelManager.generate).
+3. Session-aware chat (memory check)
+Goal: ensure the session ID is respected and stored via SessionManager.
 
-5. Core session-aware chat (optional dev checks)
-These use PrimusCore directly and are mainly for development/debugging.
-
-5.1 Non-RAG session
-Command
+Run:
 
 bash
 Copy code
-python -c "from core.primus_core import PrimusCore; from pathlib import Path; core = PrimusCore(system_root=Path('.').resolve()); core.initialize(); print(core.chat('Hello, who are you?', session_id='test_session', use_rag=False))"
-Expected
+python primus_cli.py chat "remember this line" --session s1
+python primus_cli.py chat "what did I just say?" --session s1
+Expected:
 
-No tracebacks.
+No traceback on either command.
 
-Reasonable answer introducing Primus / the assistant.
+The second answer should show awareness of the first line (for example, it might paraphrase or explicitly mention “remember this line”).
 
-5.2 RAG session
-Command
-
-bash
-Copy code
-python -c "from core.primus_core import PrimusCore; from pathlib import Path; core = PrimusCore(system_root=Path('.').resolve()); core.initialize(); print(core.chat('What do the docs talk about?', session_id='rag_sess', use_rag=True, rag_index='docs'))"
-Expected
-
-No tracebacks.
-
-Answer may reference themes from files in docs/ (subject to model behavior and hash-mock embeddings).
-
-6. Negative check – unknown index
-Command
+If you change the session ID, history should not bleed over:
 
 bash
 Copy code
-python primus_cli.py rag-search unknown_index "test query"
-Expected
+python primus_cli.py chat "who are you?" --session s2
+Answer should not depend on what was said in s1.
 
-No Python traceback.
+4. RAG-aware chat (docs index)
+Goal: check that CLI flags --rag and --index are correctly passed through and that the model sees doc content.
 
-CLI either:
+First, ensure the docs index exists:
 
-Prints a warning about a missing/empty index, or
-
-Prints no results.
-
-In all cases, the program exits cleanly.
-
-If all sections above pass without tracebacks, the CLI + core + RAG pipeline are considered “smoke-test green”.
-
-makefile
+bash
 Copy code
+python primus_cli.py rag-index docs --recursive
+Then run:
+
+bash
+Copy code
+python primus_cli.py chat "What is the Primus OS codename?" --session s_rag --rag --index docs
+Expected:
+
+No traceback.
+
+The answer should reference information that could plausibly come from the docs (especially rag_test_primus.txt), even though the current hash-based embedder is not semantically accurate.
+
+At minimum, logs should show something like:
+
+RAG retrieve request: index='docs' ...
+
+And the model response should look like it saw some context.
+
+You can also ask about Captain’s Log:
+
+bash
+Copy code
+python primus_cli.py chat "What is Captain's Log for?" --session s_rag --rag --index docs
+Expected:
+
+No errors.
+
+The answer should mention Captain’s Log as some kind of logging / audit / special mode (even if not perfectly phrased).
+
+5. Captain’s Log CLI still behaves
+(If implemented)
+
+Simple check that the cl command still works and wasn’t broken by changes to chat:
+
+bash
+Copy code
+python primus_cli.py cl write "test entry from smoke test"
+python primus_cli.py cl read
+Expected (roughly):
+
+No traceback.
+
+cl write succeeds silently or with a short confirmation.
+
+cl read prints out stored entries, including the smoke test line if your CL backend is wired up.
+
+If Captain’s Log isn’t fully implemented yet, it’s acceptable for these to say something like:
+
+text
+Copy code
+Captain's Log API is not available on PrimusCore.
+as long as the message is clean and there is no traceback.
+
+6. Quick failure triage
+If any of the above steps:
+
+Raise an exception / traceback
+
+Hang indefinitely
+
+Or obviously ignore flags (e.g., --session clearly does nothing)
+
+then:
+
+Check recent changes to primus_cli.py, core/primus_runtime.py, and core/primus_core.py.
+
+Re-run:
+
+bash
+Copy code
+python -m py_compile core/primus_core.py core/primus_runtime.py primus_cli.py
+python core/primus_runtime.py --run-bootup-test
+Fix the issues before making further feature changes.
+
+pgsql
+Copy code
+
+That should give you a solid Codex prompt and an up-to-date smoke-test doc aligned with the new session/RAG flags.
 ::contentReference[oaicite:0]{index=0}
