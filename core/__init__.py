@@ -8,36 +8,27 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from core.primus_core import PrimusCore
 
 logger = logging.getLogger(__name__)
 
-# Track the shared PrimusCore lifecycle for RAG helpers.
+# Track whether the shared PrimusCore has been initialized for RAG usage.
 _core_initialized = False
-_core_singleton: PrimusCore | None = None
-_system_root = Path(__file__).resolve().parents[1]
 
 
 def _ensure_core_initialized() -> PrimusCore:
-    """Return a singleton PrimusCore initialized for RAG helpers."""
-
-    global _core_initialized, _core_singleton
-
-    if _core_singleton is None:
-        _core_singleton = PrimusCore(system_root=_system_root)
-
+    global _core_initialized
     if not _core_initialized:
         try:
-            _core_singleton.initialize()
+            core.initialize()
             _core_initialized = True
             logger.info("core.__init__: PrimusCore initialized for RAG helpers")
         except Exception:
             logger.exception("Failed to initialize PrimusCore for RAG helpers")
             raise
-
-    return _core_singleton
+    return core
 
 
 def rag_index_path(path: str, recursive: bool = False) -> Dict[str, Any]:

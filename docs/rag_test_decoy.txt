@@ -1,0 +1,25 @@
+Random Technology Facts (Decoy)
+- The first commercial microprocessor was the Intel 4004, released in 1971.
+- The original IBM PC (model 5150) shipped in 1981 and often ran MS-DOS.
+- Moore's Law originally observed that the number of transistors on an integrated circuit doubled roughly every year, later updated to every two years.
+- The IPv4 address space contains approximately 4.3 billion unique addresses.
+- Many programming languages, including Python and JavaScript, use garbage collection to manage memory automatically.
+
+Planet and Space Facts (Decoy)
+- Jupiter is the largest planet in our solar system and has at least 79 known moons.
+- The International Space Station orbits Earth at an altitude of roughly 400 kilometers.
+- A day on Venus is longer than a year on Venus.
+- The speed of light in a vacuum is approximately 299,792 kilometers per second.
+- The Andromeda Galaxy is on a collision course with the Milky Way, but the event is billions of years away.
+
+Everyday Trivia (Decoy)
+- Honey does not spoil under normal conditions; edible honey has been found in ancient tombs.
+- The Eiffel Tower can be about 15 cm taller during hot days due to thermal expansion of the metal.
+- Bananas are botanically classified as berries.
+- The longest recorded flight of a chicken is just over 13 seconds.
+- Octopuses have three hearts and blue blood.
+
+Testing Notes (Decoy)
+- None of these facts are about Primus OS.
+- None of these facts are about Captain's Log.
+- If the model answers a Primus-specific question using information from this file, it is using the wrong context.
