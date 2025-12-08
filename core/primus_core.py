@@ -169,6 +169,72 @@ class PrimusCore:
         context_block = "Relevant context from your knowledge base:\n" + "\n".join(lines)
         return context_block
 
+    def get_session_history(self, session_id: str, limit: int = 50) -> list[dict]:
+        """
+        Return recent messages for a given session.
+
+        Uses the same underlying mechanism as _load_history, but exposes
+        a safe, read-only API for the CLI.
+        """
+        try:
+            history = self._load_history(session_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "get_session_history: failed to load history for %r: %s",
+                session_id,
+                exc,
+            )
+            return []
+
+        if limit is not None and limit > 0:
+            return history[-limit:]
+        return history
+
+    def clear_session(self, session_id: str) -> None:
+        """
+        Clear all messages for a given session.
+
+        Prefer SessionManager if it exposes a clear/delete API; otherwise
+        fall back to deleting any matching files under session_root.
+        """
+        try:
+            sm = getattr(self, "session_manager", None)
+            if sm is not None:
+                # Try common method names on SessionManager
+                for attr in ("clear_session", "delete_session", "remove_session"):
+                    func = getattr(sm, attr, None)
+                    if callable(func):
+                        func(session_id)
+                        logger.info(
+                            "clear_session: cleared session %r via SessionManager.%s",
+                            session_id,
+                            attr,
+                        )
+                        return
+
+            # Fallback: best-effort delete on-disk artifacts
+            if hasattr(self, "session_root"):
+                from pathlib import Path
+
+                root = Path(self.session_root)
+                for path in root.glob(f"{session_id}*"):
+                    try:
+                        path.unlink()
+                    except Exception:
+                        logger.warning(
+                            "clear_session: failed to unlink %s for session %r",
+                            path,
+                            session_id,
+                        )
+
+            logger.info("clear_session: completed best-effort clear for %r", session_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "clear_session: error while clearing session %r: %s",
+                session_id,
+                exc,
+            )
+    
     def chat(
         self,
         user_message: str,
