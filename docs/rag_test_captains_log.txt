@@ -1,0 +1,27 @@
+Captain's Log Overview
+- Captain's Log is an optional subsystem of Primus OS.
+- It is intended for higher-privilege control, auditing, and operational notes.
+- When inactive, Primus OS operates in normal mode.
+
+Modes and Status
+- Captain's Log has an "active" flag indicating whether it is currently engaged.
+- When Captain's Log is active, Primus OS is considered to be in "captains_log" mode.
+- When Captain's Log is not active, Primus OS is considered to be in "normal" mode.
+
+CLI Integration
+- The primary CLI command for Captain's Log is "cl".
+- The "cl" command supports three conceptual actions:
+  1) enter  - request entering Captain's Log Master Root Mode.
+  2) exit   - request exiting Captain's Log Master Root Mode.
+  3) status - show whether Captain's Log is currently active.
+- The CLI is a thin wrapper; the real logic lives in the Captain's Log manager.
+
+Manager Responsibilities
+- The Captain's Log manager tracks whether Captain's Log is active.
+- It may enforce additional checks or policies when active.
+- It provides a method to query the current status of Captain's Log.
+
+Testing Notes
+- If a query asks "What modes can Primus OS report for Captain's Log?", the correct answers are "captains_log" and "normal".
+- If a query asks "Which CLI command controls Captain's Log?", the correct answer is "cl".
+- If a query asks "What does the 'status' action do in Captain's Log CLI?", the correct answer is "it reports whether Captain's Log is active or not".
