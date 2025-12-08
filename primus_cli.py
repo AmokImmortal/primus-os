@@ -595,6 +595,59 @@ def cmd_chat_interactive(args):
             print(f"Model backend error: {exc}")
 
 
+def cmd_session_history(args):
+    runtime, _ = get_runtime()
+    if not runtime:
+        print("Runtime not available. Ensure primus runtime exists.")
+        return
+
+    core = runtime._ensure_core() if hasattr(runtime, "_ensure_core") else None
+    if not core or not hasattr(core, "get_session_history"):
+        print("Session history is not available; ensure PrimusCore exposes get_session_history().")
+        return
+
+    try:
+        history = core.get_session_history(args.session, limit=args.limit)
+    except Exception:
+        logger.exception("Failed to load session history")
+        show_trace()
+        return
+
+    if not history:
+        print(f"[INFO] No history for session '{args.session}'")
+        return
+
+    print(f"Session: {args.session}")
+    for idx, message in enumerate(history, 1):
+        role = message.get("role", "unknown")
+        content = message.get("content", "")
+        print(f"{idx}. {role:<9}: {content}")
+
+
+def cmd_session_clear(args):
+    runtime, _ = get_runtime()
+    if not runtime:
+        print("Runtime not available. Ensure primus runtime exists.")
+        return
+
+    core = runtime._ensure_core() if hasattr(runtime, "_ensure_core") else None
+    if not core or not hasattr(core, "clear_session"):
+        print("Session clearing is not available; ensure PrimusCore exposes clear_session().")
+        return
+
+    try:
+        cleared = core.clear_session(args.session)
+    except Exception:
+        logger.exception("Failed to clear session")
+        show_trace()
+        return
+
+    if cleared:
+        print(f"[OK] Cleared session '{args.session}'")
+    else:
+        print(f"[WARN] No session '{args.session}' found to clear")
+
+
 
 def cmd_subchats(args):
     runtime, _ = get_runtime()
@@ -813,6 +866,16 @@ def build_parser() -> argparse.ArgumentParser:
     rag_group_int.add_argument("--no-rag", dest="rag", action="store_false", help="Disable RAG context for chat")
     p_chat_int.set_defaults(func=cmd_chat_interactive, rag=True)
     p_chat_int.add_argument("--max-tokens", type=int, default=256, help="Maximum tokens for model response")
+
+    # session inspection/maintenance
+    p_s_hist = subparsers.add_parser("session-history", help="Show recent messages for a session")
+    p_s_hist.add_argument("--session", "-s", required=True, help="Session ID to inspect")
+    p_s_hist.add_argument("--limit", "-n", type=int, default=None, help="Maximum messages to display (most recent first)")
+    p_s_hist.set_defaults(func=cmd_session_history)
+
+    p_s_clear = subparsers.add_parser("session-clear", help="Clear stored history for a session")
+    p_s_clear.add_argument("--session", "-s", required=True, help="Session ID to clear")
+    p_s_clear.set_defaults(func=cmd_session_clear)
 
     # logs
     p_logs = subparsers.add_parser("logs", help="Show recent CLI logs")
