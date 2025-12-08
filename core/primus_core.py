@@ -121,7 +121,7 @@ class PrimusCore:
     try:
         # Replace load_session with the *real* method name
         history = sm.load_session(session_id)
-        except Exception as exc:
+    except Exception as exc:
             logger.warning("load_history failed for %r: %s", session_id, exc)
             return []
 
