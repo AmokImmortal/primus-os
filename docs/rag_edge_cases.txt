@@ -1,0 +1,106 @@
+# RAG Edge Cases – Test Corpus
+
+This file contains deliberately tricky facts to test RAG behavior:
+- Similar but not identical names
+- Overlapping concepts
+- “Don’t know” cases
+- Multi-step facts
+- Negative facts (“this is NOT …”)
+
+Only the facts in this file are true for these edge-case tests.
+
+
+[SECTION 1 – SIMILAR NAMES]
+
+FACT 1.1
+The “Primus Core Engine” is responsible for orchestrating agents, models, memory, and retrieval in Primus OS.
+
+FACT 1.2
+The “Primus Core Service” is a future planned network service and is NOT implemented yet.
+
+FACT 1.3
+The “Primus Runtime Wrapper” is a thin layer that bootstraps PrimusCore and exposes it to the CLI.
+
+FACT 1.4
+The “Primus Core Engine” and “Primus Core Service” are NOT the same thing.
+
+
+[SECTION 2 – OVERLAPPING RAG DOMAINS]
+
+FACT 2.1
+The “system-docs” index is intended for internal Primus OS documentation such as commands, architecture notes, and internal conventions.
+
+FACT 2.2
+The “user-docs” index is intended for user-facing guides, quickstart instructions, and simple how-to documents.
+
+FACT 2.3
+If a question is about internal architecture or implementation details, the answer should normally come from “system-docs”, not “user-docs”.
+
+FACT 2.4
+If a question is about how to run Primus OS commands as an end-user, the answer should normally come from “user-docs”, not “system-docs”.
+
+
+[SECTION 3 – NEGATIVE FACTS AND ABSENCE]
+
+FACT 3.1
+Primus OS does NOT include a built-in email client.
+
+FACT 3.2
+Primus OS does NOT include a web browser.
+
+FACT 3.3
+Primus OS does NOT manage operating system updates; it only provides an intelligent assistant layer and related tooling.
+
+FACT 3.4
+If a question asks about features outside these facts (for example, “Primus OS built-in video editor”), the correct behavior is to say that no such feature is documented.
+
+
+[SECTION 4 – MULTI-STEP / COMPOSITE FACTS]
+
+FACT 4.1
+Captain’s Log entries are stored in a secure log store that is conceptually separate from normal session chat history.
+
+FACT 4.2
+Primus OS can optionally summarize Captain’s Log entries for the user, but only after explicit user request.
+
+FACT 4.3
+When summarizing Captain’s Log entries, Primus OS should:
+- Preserve dates
+- Preserve high-level decisions
+- Avoid rewriting or inventing events that are not logged
+
+FACT 4.4
+A correct answer about “how Captain’s Log summaries work” must combine FACT 4.1, FACT 4.2, and FACT 4.3.
+
+
+[SECTION 5 – CONTROL QUESTIONS]
+
+FACT 5.1
+In this test corpus, the codename “EDGE-TEST-ALPHA” refers to a synthetic RAG scenario, not the real Primus OS codename.
+
+FACT 5.2
+“EDGE-TEST-ALPHA” is only used to evaluate whether the model can correctly retrieve and restate this symbol without confusing it with other codenames.
+
+FACT 5.3
+If asked, “What is the edge-test codename in the RAG edge cases note?”, the correct answer is “EDGE-TEST-ALPHA”.
+
+
+[SECTION 6 – CONTRADICTORY-SOUNDING BUT CLEAR FACTS]
+
+FACT 6.1
+Primus OS can run without any RAG index at all; in that case it falls back to pure model reasoning.
+
+FACT 6.2
+Primus OS is designed with RAG in mind, so using an appropriate index usually improves factual answers over long-term use.
+
+FACT 6.3
+These two facts are not contradictory: RAG is optional but recommended when properly configured.
+
+
+[SECTION 7 – “I DON’T KNOW” EXPECTED]
+
+FACT 7.1
+This corpus does NOT define any release dates, version numbers, or hardware requirements for Primus OS.
+
+FACT 7.2
+If a question is asked about release dates, version numbers, or hardware requirements, the correct behavior is to say that this information is not available in the current context, rather than guessing.
