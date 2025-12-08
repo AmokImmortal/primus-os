@@ -78,68 +78,49 @@ class PrimusCore:
         return self.initialized
 
     # ------------------------------------------------------------------ #
-    # RAG index + retrieval API                                          #
-    # ------------------------------------------------------------------ #
-
-    def rag_index_path(self, name: str, path: str | Path, recursive: bool = False) -> None:
-        """
-        Index the given file or directory under a named index.
-
-        - name:      logical index name (e.g. 'docs')
-        - path:      file or directory to index
-        - recursive: if True and path is a directory, recurse into subdirs
-        """
-        logger.info(
-            "RAG index request: name=%r path=%r recursive=%s",
-            name,
-            str(path),
-            recursive,
-        )
-        self.rag_indexer.index_path(name=name, path=path, recursive=recursive)
-
-    def rag_retrieve(self, name: str, query: str, top_k: int = 3) -> List[Tuple[float, Dict[str, Any]]]:
-        """
-        Retrieve top-k documents from a named index for a query.
-        """
-        logger.info("RAG retrieve request: index=%r query_len=%d top_k=%d", name, len(query), top_k)
-        return self.rag_retriever.retrieve(name=name, query=query, top_k=top_k)
-
-    # ------------------------------------------------------------------ #
     # Session-aware + RAG-aware chat                                     #
     # ------------------------------------------------------------------ #
 
-    def _load_history(self, session_id: str) -> list[dict]:
+    def _load_history(self, session_id: str) -> List[Dict[str, Any]]:
         """
         Helper to load a session history from SessionManager, if available.
 
         Expected shape: list of {'role': 'user'|'assistant', 'content': str}
         """
-    sm = getattr(self, "session_manager", None)
-    if sm is None:
+        sm = getattr(self, "session_manager", None)
+        if sm is None:
             return []
 
-    try:
-        # Replace load_session with the *real* method name
-        history = sm.load_session(session_id)
-    except Exception as exc:
+        try:
+            # Adjust this call if your SessionManager uses a different name
+            history = sm.load_session(session_id)
+        except Exception as exc:  # noqa: BLE001
             logger.warning("load_history failed for %r: %s", session_id, exc)
             return []
 
-            return history or []
+        return history or []
 
-def _append_message(self, session_id: str, role: str, content: str) -> None:
-    sm = getattr(self, "session_manager", None)
-    if sm is None:
-        return
+    def _append_message(self, session_id: str, role: str, content: str) -> None:
+        """
+        Helper to append a single message to a session via SessionManager.
+        """
+        sm = getattr(self, "session_manager", None)
+        if sm is None:
+            return
 
-    msg = {"role": role, "content": content}
-    try:
-        # Replace append_message with the *real* method name
-        sm.append_message(session_id, msg)
-    except Exception as exc:
-        logger.warning("append_message failed for %r: %s", session_id, exc)
+        msg = {"role": role, "content": content}
+        try:
+            # Adjust this call if your SessionManager uses a different name
+            sm.append_message(session_id, msg)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("append_message failed for %r: %s", session_id, exc)
 
-    def _build_rag_context(self, rag_index: str, user_message: str, top_k: int = 3) -> str:
+    def _build_rag_context(
+        self,
+        rag_index: str,
+        user_message: str,
+        top_k: int = 3,
+    ) -> str:
         """
         Fetch RAG snippets and format them as a context block for the prompt.
         """
@@ -166,7 +147,27 @@ def _append_message(self, session_id: str, role: str, content: str) -> None:
         context_block = "Relevant context from your knowledge base:\n" + "\n".join(lines)
         return context_block
 
-    def get_session_history(self, session_id: str, limit: int = 50) -> list[dict]:
+    def list_sessions(self) -> List[str]:
+        """
+        Return a list of known session IDs, if SessionManager supports it.
+        """
+        sm = getattr(self, "session_manager", None)
+        if sm is None:
+            return []
+
+        for attr in ("list_sessions", "all_sessions", "keys"):
+            func = getattr(sm, attr, None)
+            if callable(func):
+                try:
+                    sessions = func()
+                    return list(sessions)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("list_sessions via %s failed: %s", attr, exc)
+                    return []
+
+        return []
+
+    def get_session_history(self, session_id: str, limit: int = 50) -> List[Dict[str, Any]]:
         """
         Return recent messages for a given session.
 
@@ -197,7 +198,6 @@ def _append_message(self, session_id: str, role: str, content: str) -> None:
         try:
             sm = getattr(self, "session_manager", None)
             if sm is not None:
-                # Try common method names on SessionManager
                 for attr in ("clear_session", "delete_session", "remove_session"):
                     func = getattr(sm, attr, None)
                     if callable(func):
@@ -217,11 +217,12 @@ def _append_message(self, session_id: str, role: str, content: str) -> None:
                 for path in root.glob(f"{session_id}*"):
                     try:
                         path.unlink()
-                    except Exception:
+                    except Exception as exc:  # noqa: BLE001
                         logger.warning(
-                            "clear_session: failed to unlink %s for session %r",
+                            "clear_session: failed to unlink %s for session %r: %s",
                             path,
                             session_id,
+                            exc,
                         )
 
             logger.info("clear_session: completed best-effort clear for %r", session_id)
@@ -231,13 +232,13 @@ def _append_message(self, session_id: str, role: str, content: str) -> None:
                 session_id,
                 exc,
             )
-    
+
     def chat(
         self,
         user_message: str,
         session_id: str = "cli",
         use_rag: bool = False,
-        rag_index: str | None = None,
+        rag_index: Optional[str] = None,
         max_tokens: int = 256,
     ) -> str:
         """
@@ -265,7 +266,7 @@ def _append_message(self, session_id: str, role: str, content: str) -> None:
         )
 
         history_lines: List[str] = []
-        for msg in history[-10:]:  # last 10 turns only
+        for msg in history[-10:]:
             role = msg.get("role", "user")
             content = msg.get("content", "")
             if not content:
@@ -275,17 +276,16 @@ def _append_message(self, session_id: str, role: str, content: str) -> None:
             else:
                 history_lines.append(f"User: {content}")
 
-        conversation_block = "\n".join(history_lines)
         parts: List[str] = [system_prompt]
 
         if rag_context:
             parts.append("")
             parts.append(rag_context)
 
-        if conversation_block:
+        if history_lines:
             parts.append("")
             parts.append("Conversation so far:")
-            parts.append(conversation_block)
+            parts.append("\n".join(history_lines))
 
         parts.append("")
         parts.append(f"User: {user_message}")
@@ -301,10 +301,9 @@ def _append_message(self, session_id: str, role: str, content: str) -> None:
             len(prompt),
         )
 
-        # 4) Call model backend
         reply = self.model_manager.generate(prompt, max_tokens=max_tokens)
 
-        # 5) Persist updated history
+        # Persist updated history
         self._append_message(session_id, "user", user_message)
         self._append_message(session_id, "assistant", reply)
 
