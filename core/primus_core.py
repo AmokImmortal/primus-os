@@ -127,22 +127,17 @@ class PrimusCore:
 
             return history or []
 
-    def _append_message(self, session_id: str, role: str, content: str) -> None:
-        """
-        Helper to append a single message to session history.
-        """
-        sm = self.session_manager
-        append_fn = getattr(sm, "append_message", None)
-        if callable(append_fn):
-            try:
-                append_fn(session_id, role, content)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "Failed to append message to session %r (role=%s): %s",
-                    session_id,
-                    role,
-                    exc,
-                )
+def _append_message(self, session_id: str, role: str, content: str) -> None:
+    sm = getattr(self, "session_manager", None)
+    if sm is None:
+        return
+
+    msg = {"role": role, "content": content}
+    try:
+        # Replace append_message with the *real* method name
+        sm.append_message(session_id, msg)
+    except Exception as exc:
+        logger.warning("append_message failed for %r: %s", session_id, exc)
 
     def _build_rag_context(self, rag_index: str, user_message: str, top_k: int = 3) -> str:
         """
