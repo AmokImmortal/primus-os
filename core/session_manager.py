@@ -31,12 +31,14 @@ Session structure (example):
 }
 """
 
-import os
+from __future__ import annotations
+
 import json
-import uuid
+import os
 import threading
+import uuid
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 
 # Import personality manager for permission checks (assumes core/persona.py loaded earlier)
 try:
@@ -46,19 +48,15 @@ except Exception:
     personality_manager = None  # type: ignore
 
 # Path for sessions folder
-SESSIONS_DIR = os.path.join("system", "sessions")
-os.makedirs(SESSIONS_DIR, exist_ok=True)
+DEFAULT_SESSIONS_DIR = os.path.join("system", "sessions")
+os.makedirs(DEFAULT_SESSIONS_DIR, exist_ok=True)
 
 # Simple thread lock for safe writes
 _io_lock = threading.Lock()
 
 
-def _now_iso():
+def _now_iso() -> str:
     return datetime.utcnow().isoformat() + "Z"
-
-
-def _session_path(session_id: str) -> str:
-    return os.path.join(SESSIONS_DIR, f"{session_id}.json")
 
 
 class SessionNotFound(Exception):
@@ -70,24 +68,30 @@ class PermissionDenied(Exception):
 
 
 class SessionManager:
-    def __init__(self):
+    def __init__(self, session_root: Optional[str] = None):
+        # allow callers to override the storage root, defaulting to module constant
+        self.session_root = session_root or "system"
+        self._sessions_dir = os.path.join(self.session_root, "sessions")
+        os.makedirs(self._sessions_dir, exist_ok=True)
+
         # in-memory cache for quick lookups (id -> dict)
         self._cache: Dict[str, Dict[str, Any]] = {}
+        self.max_history: int = 500
         # load existing session metadata (lazy loads content)
         self._index_sessions()
 
     # -------------------------
     # Disk index / bootstrap
     # -------------------------
-    def _index_sessions(self):
+    def _index_sessions(self) -> None:
         self._cache = {}
-        for fname in os.listdir(SESSIONS_DIR):
+        for fname in os.listdir(self._sessions_dir):
             if not fname.endswith(".json"):
                 continue
             sid = fname[:-5]
             # don't load entire content now; store basic metadata placeholder
             try:
-                with open(_session_path(sid), "r", encoding="utf-8") as f:
+                with open(self._session_path(sid), "r", encoding="utf-8") as f:
                     obj = json.load(f)
                 # Minimal validation
                 if isinstance(obj, dict) and obj.get("id") == sid:
@@ -99,8 +103,15 @@ class SessionManager:
     # -------------------------
     # Create / Save / Load
     # -------------------------
-    def create_session(self, title: str, owner: str = "user", privacy: str = "private", meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        session_id = str(uuid.uuid4())
+    def create_session(
+        self,
+        title: str,
+        owner: str = "user",
+        privacy: str = "private",
+        meta: Optional[Dict[str, Any]] = None,
+        session_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        session_id = session_id or str(uuid.uuid4())
         session = {
             "id": session_id,
             "title": title,
@@ -109,14 +120,17 @@ class SessionManager:
             "privacy": privacy,  # "private" or "shared"
             "agents_linked": [],
             "messages": [],
-            "meta": meta or {}
+            "meta": meta or {},
         }
         self._save_to_disk(session)
         self._cache[session_id] = session
         return session
 
-    def _save_to_disk(self, session: Dict[str, Any]):
-        path = _session_path(session["id"])
+    def _session_path(self, session_id: str) -> str:
+        return os.path.join(self._sessions_dir, f"{session_id}.json")
+
+    def _save_to_disk(self, session: Dict[str, Any]) -> None:
+        path = self._session_path(session["id"])
         tmp = path + ".tmp"
         with _io_lock:
             with open(tmp, "w", encoding="utf-8") as f:
@@ -124,7 +138,7 @@ class SessionManager:
             # atomic replace
             os.replace(tmp, path)
 
-    def save_session(self, session_id: str):
+    def save_session(self, session_id: str) -> None:
         session = self._cache.get(session_id)
         if not session:
             raise SessionNotFound(f"No session: {session_id}")
@@ -135,7 +149,7 @@ class SessionManager:
         if session_id in self._cache:
             return self._cache[session_id]
 
-        path = _session_path(session_id)
+        path = self._session_path(session_id)
         if not os.path.exists(path):
             raise SessionNotFound(session_id)
         with open(path, "r", encoding="utf-8") as f:
@@ -144,25 +158,72 @@ class SessionManager:
         return obj
 
     # -------------------------
+    # Session helpers
+    # -------------------------
+    def session_exists(self, session_id: str) -> bool:
+        if session_id in self._cache:
+            return True
+        return os.path.exists(self._session_path(session_id))
+
+    def ensure_session(self, session_id: str, owner: str = "user", privacy: str = "private") -> Dict[str, Any]:
+        if self.session_exists(session_id):
+            return self.load_session(session_id)
+
+        session = {
+            "id": session_id,
+            "title": session_id,
+            "created_at": _now_iso(),
+            "owner": owner,
+            "privacy": privacy,
+            "agents_linked": [],
+            "messages": [],
+            "meta": {},
+        }
+        self._save_to_disk(session)
+        self._cache[session_id] = session
+        return session
+
+    def load_history(self, session_id: str) -> List[Dict[str, Any]]:
+        session = self.load_session(session_id)
+        return list(session.get("messages", []))
+
+    def save_history(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
+        session = self.load_session(session_id)
+        if self.max_history and len(messages) > self.max_history:
+            messages = messages[-self.max_history :]
+        session["messages"] = messages
+        self._save_to_disk(session)
+
+    # -------------------------
     # Listing / Searching
     # -------------------------
     def list_sessions(self) -> List[Dict[str, Any]]:
         # Return light-weight session listings (id, title, owner, privacy, created_at)
         out = []
         for sid, obj in self._cache.items():
-            out.append({
-                "id": sid,
-                "title": obj.get("title"),
-                "owner": obj.get("owner"),
-                "privacy": obj.get("privacy"),
-                "created_at": obj.get("created_at")
-            })
-        return sorted(out, key=lambda x: x["created_at"])
+            out.append(
+                {
+                    "id": sid,
+                    "title": obj.get("title"),
+                    "owner": obj.get("owner"),
+                    "privacy": obj.get("privacy"),
+                    "created_at": obj.get("created_at"),
+                }
+            )
+        return sorted(out, key=lambda x: x.get("created_at") or "")
 
     # -------------------------
     # Messages API
     # -------------------------
-    def add_message(self, session_id: str, role: str, who: str, text: str, ts: Optional[str] = None, allow_agent_read_cross: bool = True) -> Dict[str, Any]:
+    def add_message(
+        self,
+        session_id: str,
+        role: str,
+        who: str,
+        text: str,
+        ts: Optional[str] = None,
+        allow_agent_read_cross: bool = True,
+    ) -> Dict[str, Any]:
         """
         role: "user" | "agent" | "system"
         who: identifier (e.g., "user", "PRIMUS", "BusinessAgent")
@@ -175,15 +236,19 @@ class SessionManager:
             if personality_manager:
                 # if agent, ensure permission to write to private session
                 if who != "user" and not personality_manager.allow_agent_write_other_agents(who):
-                    raise PermissionDenied(f"Agent {who} not allowed to write to private session {session_id}")
+                    raise PermissionDenied(
+                        f"Agent {who} not allowed to write to private session {session_id}"
+                    )
 
         msg = {
             "role": role,
             "who": who,
             "text": text,
-            "ts": ts or _now_iso()
+            "ts": ts or _now_iso(),
         }
         session.setdefault("messages", []).append(msg)
+        if self.max_history and len(session["messages"]) > self.max_history:
+            session["messages"] = session["messages"][-self.max_history :]
         # persist immediately
         self._save_to_disk(session)
         return msg
@@ -196,7 +261,9 @@ class SessionManager:
     # -------------------------
     # Sub-sessions / Agent linking
     # -------------------------
-    def create_subsession(self, parent_session_id: str, title: str, agent_name: str, privacy: Optional[str] = None) -> Dict[str, Any]:
+    def create_subsession(
+        self, parent_session_id: str, title: str, agent_name: str, privacy: Optional[str] = None
+    ) -> Dict[str, Any]:
         parent = self.load_session(parent_session_id)
         # subsessions are owned by the same owner by default
         owner = parent.get("owner", "user")
@@ -210,7 +277,7 @@ class SessionManager:
         self._save_to_disk(parent)
         return sub
 
-    def link_agent_to_session(self, session_id: str, agent_name: str):
+    def link_agent_to_session(self, session_id: str, agent_name: str) -> None:
         session = self.load_session(session_id)
         if agent_name not in session.get("agents_linked", []):
             session.setdefault("agents_linked", []).append(agent_name)
@@ -219,7 +286,7 @@ class SessionManager:
     # -------------------------
     # Privacy / permission helpers
     # -------------------------
-    def set_privacy(self, session_id: str, privacy: str):
+    def set_privacy(self, session_id: str, privacy: str) -> None:
         if privacy not in ("private", "shared"):
             raise ValueError("privacy must be 'private' or 'shared'")
         session = self.load_session(session_id)
@@ -257,7 +324,7 @@ class SessionManager:
             lines.append(text)
             lines.append("")
 
-        out_path = out_path or os.path.join(SESSIONS_DIR, f"{session_id}.txt")
+        out_path = out_path or os.path.join(self._sessions_dir, f"{session_id}.txt")
         with open(out_path, "w", encoding="utf-8") as f:
             f.write("\n".join(lines))
         return out_path
@@ -265,20 +332,20 @@ class SessionManager:
     # -------------------------
     # Administrative
     # -------------------------
-    def delete_session(self, session_id: str):
+    def delete_session(self, session_id: str) -> None:
         session = self._cache.get(session_id)
         if session:
             try:
-                os.remove(_session_path(session_id))
+                os.remove(self._session_path(session_id))
             except FileNotFoundError:
                 pass
             del self._cache[session_id]
 
-    def clear_all_sessions(self):
+    def clear_all_sessions(self) -> None:
         # Dangerous: deletes all on disk and in cache
         for sid in list(self._cache.keys()):
             try:
-                os.remove(_session_path(sid))
+                os.remove(self._session_path(sid))
             except Exception:
                 pass
             del self._cache[sid]
@@ -286,3 +353,4 @@ class SessionManager:
 
 # Single global manager
 session_manager = SessionManager()
+
