@@ -419,47 +419,77 @@ class RAGManager:
         if not files:
             return {"status": "error", "error": "no_text_files_found"}
 
-        # chunking
-        chunks: List[str] = []
-        metadatas: List[Dict[str, Any]] = []
-        for file_path, text in files:
+        def _chunk_text(text: str, size: int, overlap_size: int) -> List[Tuple[int, int, str]]:
+            """
+            Split text into overlapping chunks returning (start, end, chunk_text) tuples.
+
+            Ensures forward progress even if size <= overlap_size.
+            """
+
+            if size <= 0:
+                return []
+
+            step = max(size - overlap_size, 1)
+            chunks_local: List[Tuple[int, int, str]] = []
             start = 0
-            L = len(text)
-            if L == 0:
-                continue
-            while start < L:
-                end = start + chunk_size
-                chunk = text[start:end]
-                chunks.append(chunk)
-                metadatas.append({"source_file": file_path, "chunk_index": len(metadatas), "text": chunk})
-                start += (chunk_size - overlap)
+            text_length = len(text)
 
-        logger.info("Ingest: %d chunks prepared from %d files", len(chunks), len(files))
+            while start < text_length:
+                end = min(start + size, text_length)
+                chunk_text = text[start:end]
+                chunks_local.append((start, end, chunk_text))
 
-        # embed
+                if end >= text_length:
+                    break
+                start += step
+
+            return chunks_local
+
+        # chunking
+        all_vectors: List[np.ndarray] = []
+        all_metadatas: List[Dict[str, Any]] = []
+
         embedder = self._get_embedder(model_name)
         if embedder is None:
             logger.warning("No embedder available; cannot embed chunks.")
             return {"status": "error", "error": "no_embedder"}
 
-        # embed in batches for memory safety
-        batch_size = 256
-        vectors_list = []
-        for i in range(0, len(chunks), batch_size):
-            batch = chunks[i:i + batch_size]
-            vecs = embedder.embed(batch)
-            vectors_list.append(np.asarray(vecs, dtype=np.float32))
-        if vectors_list:
-            vectors = np.vstack(vectors_list)
-        else:
-            vectors = np.zeros((0, 384), dtype=np.float32)
+        for file_path, text in files:
+            file_chunks = _chunk_text(text, chunk_size, overlap)
+            if not file_chunks:
+                continue
+
+            chunk_texts = [chunk_text for _, _, chunk_text in file_chunks]
+            vectors = embedder.embed(chunk_texts)
+            vectors = np.asarray(vectors, dtype=np.float32)
+
+            for idx, (start, end, chunk_text) in enumerate(file_chunks):
+                all_metadatas.append({
+                    "path": file_path,
+                    "source_file": file_path,
+                    "chunk_id": idx,
+                    "chunk_index": len(all_metadatas),
+                    "start": start,
+                    "end": end,
+                    "text": chunk_text,
+                })
+
+            all_vectors.append(vectors)
+
+        total_chunks = len(all_metadatas)
+        logger.info("Ingest: %d chunks prepared from %d files", total_chunks, len(files))
+
+        if not all_vectors:
+            return {"status": "error", "error": "no_chunks_embedded"}
+
+        vectors_stacked = np.vstack(all_vectors) if len(all_vectors) > 1 else all_vectors[0]
 
         # create scoped store and add
         scope_dir = self._get_scope_dir(scope)
         store = ScopedVectorStore(scope_dir)
-        add_res = store.add(vectors, metadatas)
+        add_res = store.add(vectors_stacked, all_metadatas)
         logger.info("Ingest add result: %s", add_res)
-        return {"status": "ok", "added": add_res.get("added", 0)}
+        return {"status": "ok", "added": add_res.get("added", 0), "chunks": total_chunks}
 
     def search(self, query: str, agent_name: Optional[str] = None, scope: str = "system",
                topk: int = 5, model_name: str = "all-MiniLM-L6-v2") -> List[Dict[str, Any]]:

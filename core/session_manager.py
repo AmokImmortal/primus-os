@@ -2,286 +2,255 @@
 """
 Session Manager for PRIMUS OS
 
-Responsibilities:
-- Create / list / load / save chat sessions (PRIMUS main + agent sub-sessions)
-- Support private vs shared sessions
-- Persist sessions to disk under system/sessions/
-- Provide simple APIs to append messages, query history, export transcripts
-- Enforce permissions using the personality manager where applicable
-- Lightweight locking/atomic save to reduce corruption risk
-
-Storage layout (relative to repo root):
-system/
-  sessions/
-    <session_id>.json
-
-Session structure (example):
-{
-  "id": "session-uuid",
-  "title": "PRIMUS — Business Ops",
-  "created_at": "2025-11-30T12:00:00Z",
-  "owner": "user",                 # "user" or agent name
-  "privacy": "private" | "shared",
-  "agents_linked": ["BusinessAgent"],
-  "messages": [
-      {"role":"user","who":"you","text":"Hello", "ts": "..."},
-      {"role":"agent","who":"PRIMUS","text":"Hi", "ts":"..."}
-  ],
-  "meta": { ... }   # optional metadata
-}
+This module provides persistent, per-session chat history storage. Histories are
+stored on disk so that conversations survive across CLI invocations. Each
+session is saved as a JSON Lines (JSONL) file containing message dictionaries
+with ``role`` and ``content`` keys (and optional ``ts`` metadata).
 """
 
-import os
+from __future__ import annotations
+
 import json
-import uuid
+import logging
 import threading
-from datetime import datetime
-from typing import List, Dict, Any, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-# Import personality manager for permission checks (assumes core/persona.py loaded earlier)
-try:
-    from core.persona import personality_manager
-except Exception:
-    # If running standalone tests, a minimal stub is used
-    personality_manager = None  # type: ignore
+logger = logging.getLogger(__name__)
 
-# Path for sessions folder
-SESSIONS_DIR = os.path.join("system", "sessions")
-os.makedirs(SESSIONS_DIR, exist_ok=True)
+DEFAULT_SESSIONS_DIR = Path("system") / "sessions"
+DEFAULT_SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 
-# Simple thread lock for safe writes
+# Shared lock to keep disk writes safe across threads/processes
 _io_lock = threading.Lock()
 
 
-def _now_iso():
+def _now_iso() -> str:
+    from datetime import datetime
+
     return datetime.utcnow().isoformat() + "Z"
 
 
-def _session_path(session_id: str) -> str:
-    return os.path.join(SESSIONS_DIR, f"{session_id}.json")
-
-
-class SessionNotFound(Exception):
-    pass
-
-
-class PermissionDenied(Exception):
-    pass
-
-
 class SessionManager:
-    def __init__(self):
-        # in-memory cache for quick lookups (id -> dict)
-        self._cache: Dict[str, Dict[str, Any]] = {}
-        # load existing session metadata (lazy loads content)
-        self._index_sessions()
+    """Manage chat sessions with simple JSONL persistence."""
 
-    # -------------------------
-    # Disk index / bootstrap
-    # -------------------------
-    def _index_sessions(self):
-        self._cache = {}
-        for fname in os.listdir(SESSIONS_DIR):
-            if not fname.endswith(".json"):
-                continue
-            sid = fname[:-5]
-            # don't load entire content now; store basic metadata placeholder
+    def __init__(self, session_root: Optional[str | Path] = None, max_history: int = 500):
+        root = Path(session_root) if session_root is not None else Path("system")
+        self.session_root: Path = root
+        self.sessions_dir: Path = (root / "sessions").resolve()
+        self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        self.max_history = max_history
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def _session_path(self, session_id: str) -> Path:
+        path = self.sessions_dir / f"{session_id}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def _trim_history(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if self.max_history and len(messages) > self.max_history:
+            return messages[-self.max_history :]
+        return messages
+
+    @staticmethod
+    def _normalize_messages(raw: Any, session_id: str) -> List[Dict[str, Any]]:
+        messages: List[Dict[str, Any]] = []
+        if isinstance(raw, list):
+            for item in raw:
+                if not isinstance(item, dict):
+                    continue
+                role = item.get("role") or item.get("who")
+                content = item.get("content")
+                if content is None:
+                    content = item.get("text")
+                if role and content is not None:
+                    entry = {"role": role, "content": content}
+                    if "ts" in item:
+                        entry["ts"] = item.get("ts")
+                    messages.append(entry)
+        elif isinstance(raw, dict):
+            nested = raw.get("messages", [])
+            messages = SessionManager._normalize_messages(nested, session_id)
+        else:
+            logger.warning(
+                "SessionManager: unsupported session payload for %s; returning empty history", session_id
+            )
+        return messages
+
+    def _read_session_file(self, session_id: str) -> List[Dict[str, Any]]:
+        path = self._session_path(session_id)
+        if not path.exists():
+            return []
+        messages: List[Dict[str, Any]] = []
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        parsed = json.loads(line)
+                        messages.append(parsed)
+                    except Exception:
+                        logger.warning("SessionManager.load_history: failed to parse line in %s", path)
+                        continue
+            if messages:
+                return self._normalize_messages(messages, session_id)
+            # Legacy fallback: attempt to read a single JSON payload
             try:
-                with open(_session_path(sid), "r", encoding="utf-8") as f:
-                    obj = json.load(f)
-                # Minimal validation
-                if isinstance(obj, dict) and obj.get("id") == sid:
-                    self._cache[sid] = obj
+                with path.open("r", encoding="utf-8") as handle:
+                    raw = json.load(handle)
+                return self._normalize_messages(raw, session_id)
             except Exception:
-                # ignore malformed files; they can be inspected later
-                continue
+                return []
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("SessionManager.load_history: failed to parse %s: %s", path, exc)
+            return []
 
-    # -------------------------
-    # Create / Save / Load
-    # -------------------------
-    def create_session(self, title: str, owner: str = "user", privacy: str = "private", meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        session_id = str(uuid.uuid4())
-        session = {
-            "id": session_id,
+    def _write_session_file(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
+        messages = self._trim_history(messages)
+        path = self._session_path(session_id)
+        tmp_path = path.with_suffix(".jsonl.tmp")
+        try:
+            with _io_lock:
+                with tmp_path.open("w", encoding="utf-8") as handle:
+                    for msg in messages:
+                        json.dump(msg, handle, ensure_ascii=False)
+                        handle.write("\n")
+                tmp_path.replace(path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("SessionManager: failed to write %s: %s", path, exc)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def load_history(self, session_id: str) -> List[Dict[str, Any]]:
+        """Return stored history for a session, or an empty list if missing."""
+        history = self._read_session_file(session_id)
+        if history and len(history) > self.max_history:
+            history = self._trim_history(history)
+            try:
+                self._write_session_file(session_id, history)
+            except Exception:
+                logger.debug("SessionManager: failed to persist trimmed history for %s", session_id)
+        if history:
+            logger.debug("SessionManager.load_history: loaded %d messages for %s", len(history), session_id)
+        return history
+
+    def load_session(self, session_id: str) -> List[Dict[str, Any]]:
+        """Compatibility wrapper that delegates to ``load_history``."""
+        try:
+            history = self.load_history(session_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("load_session failed for %r: %s", session_id, exc)
+            return []
+        return history or []
+
+    def append_message(self, session_id: str, msg: Dict[str, Any]) -> None:
+        """Append a message and persist the session, trimming if needed."""
+        if not isinstance(msg, dict):
+            logger.debug("SessionManager.append_message: msg must be dict; skipping for %s", session_id)
+            return
+
+        role = msg.get("role")
+        content = msg.get("content")
+        if role is None or content is None:
+            logger.debug("SessionManager.append_message: incomplete message for %s; skipping", session_id)
+            return
+
+        history = self.load_session(session_id)
+        entry = {"role": role, "content": content, "ts": msg.get("ts", _now_iso())}
+        history.append(entry)
+        try:
+            self._write_session_file(session_id, history)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("SessionManager.append_message failed for %r: %s", session_id, exc)
+            return
+        logger.debug(
+            "SessionManager.append_message: session=%s total_messages=%d", session_id, len(history)
+        )
+
+    def save_history(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
+        self._write_session_file(session_id, messages)
+
+    def delete_session(self, session_id: str) -> None:
+        path = self._session_path(session_id)
+        try:
+            if path.exists():
+                path.unlink()
+                logger.info("SessionManager.delete_session: removed %s", path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("SessionManager.delete_session: failed to delete %s: %s", path, exc)
+
+    def clear_session(self, session_id: str) -> None:
+        """Compatibility wrapper to delete all persisted data for a session."""
+
+        try:
+            self.delete_session(session_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("clear_session failed for %r: %s", session_id, exc)
+
+    def list_sessions(self) -> List[str]:
+        sessions = []
+        if not self.sessions_dir.exists():
+            return sessions
+        for path in self.sessions_dir.glob("*.jsonl"):
+            sessions.append(path.stem)
+        return sorted(sessions)
+
+    def session_exists(self, session_id: str) -> bool:
+        return self._session_path(session_id).exists()
+
+    # ------------------------------------------------------------------
+    # Legacy/compat helpers (lightweight stubs retained for compatibility)
+    # ------------------------------------------------------------------
+    def ensure_session(self, session_id: str, owner: str = "user", privacy: str = "private") -> Dict[str, Any]:
+        # owner and privacy currently informational only
+        if not self.session_exists(session_id):
+            self._write_session_file(session_id, [])
+        return {"id": session_id, "owner": owner, "privacy": privacy, "messages": []}
+
+    def create_session(
+        self,
+        title: str,
+        owner: str = "user",
+        privacy: str = "private",
+        meta: Optional[Dict[str, Any]] = None,
+        session_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        sid = session_id or title
+        self._write_session_file(sid, [])
+        return {
+            "id": sid,
             "title": title,
-            "created_at": _now_iso(),
             "owner": owner,
-            "privacy": privacy,  # "private" or "shared"
-            "agents_linked": [],
+            "privacy": privacy,
+            "meta": meta or {},
             "messages": [],
-            "meta": meta or {}
         }
-        self._save_to_disk(session)
-        self._cache[session_id] = session
-        return session
 
-    def _save_to_disk(self, session: Dict[str, Any]):
-        path = _session_path(session["id"])
-        tmp = path + ".tmp"
-        with _io_lock:
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(session, f, indent=2, ensure_ascii=False)
-            # atomic replace
-            os.replace(tmp, path)
-
-    def save_session(self, session_id: str):
-        session = self._cache.get(session_id)
-        if not session:
-            raise SessionNotFound(f"No session: {session_id}")
-        self._save_to_disk(session)
-
-    def load_session(self, session_id: str) -> Dict[str, Any]:
-        # If cached, return it
-        if session_id in self._cache:
-            return self._cache[session_id]
-
-        path = _session_path(session_id)
-        if not os.path.exists(path):
-            raise SessionNotFound(session_id)
-        with open(path, "r", encoding="utf-8") as f:
-            obj = json.load(f)
-        self._cache[session_id] = obj
-        return obj
-
-    # -------------------------
-    # Listing / Searching
-    # -------------------------
-    def list_sessions(self) -> List[Dict[str, Any]]:
-        # Return light-weight session listings (id, title, owner, privacy, created_at)
-        out = []
-        for sid, obj in self._cache.items():
-            out.append({
-                "id": sid,
-                "title": obj.get("title"),
-                "owner": obj.get("owner"),
-                "privacy": obj.get("privacy"),
-                "created_at": obj.get("created_at")
-            })
-        return sorted(out, key=lambda x: x["created_at"])
-
-    # -------------------------
-    # Messages API
-    # -------------------------
-    def add_message(self, session_id: str, role: str, who: str, text: str, ts: Optional[str] = None, allow_agent_read_cross: bool = True) -> Dict[str, Any]:
-        """
-        role: "user" | "agent" | "system"
-        who: identifier (e.g., "user", "PRIMUS", "BusinessAgent")
-        """
-        session = self.load_session(session_id)
-
-        # Privacy enforcement: if session is private and message is from agent not owner,
-        # check agent's permission to write into private sessions.
-        if session.get("privacy") == "private" and who != session.get("owner"):
-            if personality_manager:
-                # if agent, ensure permission to write to private session
-                if who != "user" and not personality_manager.allow_agent_write_other_agents(who):
-                    raise PermissionDenied(f"Agent {who} not allowed to write to private session {session_id}")
-
-        msg = {
-            "role": role,
-            "who": who,
-            "text": text,
-            "ts": ts or _now_iso()
-        }
-        session.setdefault("messages", []).append(msg)
-        # persist immediately
-        self._save_to_disk(session)
+    def add_message(
+        self,
+        session_id: str,
+        role: str,
+        who: str,
+        text: str,
+        ts: Optional[str] = None,
+        allow_agent_read_cross: bool = True,
+    ) -> Dict[str, Any]:
+        msg = {"role": role, "content": text, "ts": ts or _now_iso(), "who": who}
+        self.append_message(session_id, msg)
         return msg
 
     def get_messages(self, session_id: str, start: int = 0, end: Optional[int] = None) -> List[Dict[str, Any]]:
-        session = self.load_session(session_id)
-        msgs = session.get("messages", [])
-        return msgs[start:end]
+        history = self.load_history(session_id)
+        return history[start:end]
 
-    # -------------------------
-    # Sub-sessions / Agent linking
-    # -------------------------
-    def create_subsession(self, parent_session_id: str, title: str, agent_name: str, privacy: Optional[str] = None) -> Dict[str, Any]:
-        parent = self.load_session(parent_session_id)
-        # subsessions are owned by the same owner by default
-        owner = parent.get("owner", "user")
-        privacy = privacy or parent.get("privacy", "private")
-        sub = self.create_session(title=title, owner=owner, privacy=privacy)
-        # Link agent information
-        sub.setdefault("agents_linked", []).append(agent_name)
-        self._cache[sub["id"]] = sub
-        # persist parent link
-        parent.setdefault("meta", {}).setdefault("subsessions", []).append(sub["id"])
-        self._save_to_disk(parent)
-        return sub
-
-    def link_agent_to_session(self, session_id: str, agent_name: str):
-        session = self.load_session(session_id)
-        if agent_name not in session.get("agents_linked", []):
-            session.setdefault("agents_linked", []).append(agent_name)
-            self._save_to_disk(session)
-
-    # -------------------------
-    # Privacy / permission helpers
-    # -------------------------
-    def set_privacy(self, session_id: str, privacy: str):
-        if privacy not in ("private", "shared"):
-            raise ValueError("privacy must be 'private' or 'shared'")
-        session = self.load_session(session_id)
-        session["privacy"] = privacy
-        self._save_to_disk(session)
-
-    def can_agent_read_session(self, agent_name: str, session_id: str) -> bool:
-        session = self.load_session(session_id)
-        if session.get("privacy") == "shared":
-            return True
-        # private session: only owner and permitted agents
-        if agent_name == session.get("owner"):
-            return True
-        if personality_manager:
-            return personality_manager.allow_agent_read_other_agents(agent_name)
-        return False
-
-    # -------------------------
-    # Export / Transcript
-    # -------------------------
-    def export_transcript_txt(self, session_id: str, out_path: Optional[str] = None) -> str:
-        session = self.load_session(session_id)
-        lines = []
-        lines.append(f"Session: {session.get('title')} ({session.get('id')})")
-        lines.append(f"Owner: {session.get('owner')}")
-        lines.append(f"Privacy: {session.get('privacy')}")
-        lines.append(f"Created: {session.get('created_at')}")
-        lines.append("\n--- Messages ---\n")
-        for m in session.get("messages", []):
-            ts = m.get("ts", "")
-            who = m.get("who", "")
-            role = m.get("role", "")
-            text = m.get("text", "")
-            lines.append(f"[{ts}] {who} ({role}):")
-            lines.append(text)
-            lines.append("")
-
-        out_path = out_path or os.path.join(SESSIONS_DIR, f"{session_id}.txt")
-        with open(out_path, "w", encoding="utf-8") as f:
-            f.write("\n".join(lines))
-        return out_path
-
-    # -------------------------
-    # Administrative
-    # -------------------------
-    def delete_session(self, session_id: str):
-        session = self._cache.get(session_id)
-        if session:
-            try:
-                os.remove(_session_path(session_id))
-            except FileNotFoundError:
-                pass
-            del self._cache[session_id]
-
-    def clear_all_sessions(self):
-        # Dangerous: deletes all on disk and in cache
-        for sid in list(self._cache.keys()):
-            try:
-                os.remove(_session_path(sid))
-            except Exception:
-                pass
-            del self._cache[sid]
+    def clear_all_sessions(self) -> None:
+        for sid in self.list_sessions():
+            self.delete_session(sid)
 
 
 # Single global manager
