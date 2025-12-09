@@ -21,8 +21,9 @@ import logging
 import os
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 # ====== Configuration defaults ======
 SYSTEM_ROOT = Path(__file__).resolve().parents[2]  # .../System/core -> parents[2] => .../System
@@ -51,6 +52,9 @@ logger.addHandler(ch)
 
 
 # ====== Defensive imports for pluggable components ======
+if TYPE_CHECKING:  # pragma: no cover - typing aid only
+    from captains_log.cl_manager import CaptainsLogManager
+
 try:
     from rag.rag_manager import RAGManager  # user-created rag_manager.py
 except Exception:
@@ -88,17 +92,24 @@ except Exception:
     logger.warning("MemoryManager not available; memory features will be limited.")
 
 try:
-    from core.session_manager import SessionManager
+    from core.session_manager import SessionManager, SessionNotFound
 except Exception:
     SessionManager = None
+    SessionNotFound = None  # type: ignore
     logger.warning("SessionManager not available; sessions will be limited.")
 
 
 # ====== Core controller class ======
 class PrimusCore:
-    def __init__(self, max_parallel_interactions: int = DEFAULT_MAX_PARALLEL_AGENT_INTERACTIONS):
-        self.system_root = SYSTEM_ROOT
+    def __init__(
+        self,
+        system_root: Path = SYSTEM_ROOT,
+        max_parallel_interactions: int = DEFAULT_MAX_PARALLEL_AGENT_INTERACTIONS,
+        captains_log_manager: "CaptainsLogManager | None" = None,
+    ):
+        self.system_root = system_root
         self.max_parallel_interactions = max_parallel_interactions
+        self.captains_log_manager = captains_log_manager
 
         # Components (filled in initialize)
         self.rag: Optional[Any] = None
@@ -386,6 +397,67 @@ class PrimusCore:
             logger.exception("Search failed.")
             return {"status": "error", "error": str(e)}
 
+    def rag_index_path(self, name: str, path: str | Path, recursive: bool = False) -> None:
+        """
+        Public wrapper used by the CLI to index a path into a named RAG index.
+        Thin wrapper around the underlying RAG indexer / manager.
+        """
+
+        logger.info(
+            "RAG index request: name=%r path=%r recursive=%s",
+            name,
+            str(path),
+            recursive,
+        )
+
+        rm = getattr(self, "rag_manager", None)
+        if rm is not None and hasattr(rm, "index_path"):
+            rm.index_path(name=name, path=str(path), recursive=recursive)
+            return
+
+        if hasattr(self, "rag_indexer") and getattr(self, "rag_indexer") is not None:
+            self.rag_indexer.index_path(name=name, path=str(path), recursive=recursive)
+            return
+
+        logger.warning(
+            "rag_index_path called but no RAG indexer/manager is configured "
+            "(name=%r, path=%r)",
+            name,
+            path,
+        )
+
+    def rag_retrieve(
+        self,
+        name: str,
+        query: str,
+        top_k: int = 3,
+    ) -> List[Tuple[float, Dict[str, Any]]]:
+        """
+        Public helper to retrieve top-k documents from a named RAG index.
+        Thin wrapper around the underlying RAG retriever / manager.
+        """
+
+        logger.info(
+            "RAG retrieve request: index=%r query_len=%d top_k=%d",
+            name,
+            len(query),
+            top_k,
+        )
+
+        rm = getattr(self, "rag_manager", None)
+        if rm is not None and hasattr(rm, "retrieve"):
+            return rm.retrieve(name=name, query=query, top_k=top_k)
+
+        if hasattr(self, "rag_retriever") and getattr(self, "rag_retriever") is not None:
+            return self.rag_retriever.retrieve(name=name, query=query, top_k=top_k)
+
+        logger.warning(
+            "rag_retrieve called but no RAG retriever/manager is configured "
+            "(index=%r)",
+            name,
+        )
+        return []
+
     # -------------------------
     # Agent -> Agent routing (permissioned + approval)
     # -------------------------
@@ -603,6 +675,455 @@ class PrimusCore:
         return status
 
     # -------------------------
+    # Chat APIs (unified entrypoint)
+    # -------------------------
+    def chat(
+        self,
+        user_message: str,
+        session_id: Optional[str] = None,
+        use_rag: bool = False,
+        rag_index: Optional[str] = None,
+        max_tokens: int = 256,
+    ) -> str:
+        """
+        Unified chat entrypoint for PrimusCore with optional session history and RAG context.
+
+        The method centralizes chat behavior for all front-ends by:
+        - loading prior turns when a session id is supplied (creating the session skeleton if
+          missing),
+        - optionally retrieving RAG snippets when `use_rag` and `rag_index` are provided,
+        - building a single prompt that includes a short system primer, optional RAG context,
+          any conversation history, and the latest user message,
+        - delegating response generation to the configured ModelManager, and
+        - persisting the new turn back into the session when a session id is in use.
+        """
+
+        if not self.model_manager:
+            raise RuntimeError("ModelManager not initialized; cannot generate responses.")
+
+        history: List[Dict[str, Any]] = []
+        active_session_id: Optional[str] = None
+
+        if session_id:
+            if not self.session_manager:
+                raise RuntimeError("SessionManager not initialized; session-based chat unavailable.")
+            active_session_id, history = self._load_or_initialize_session(session_id)
+
+        rag_snippets = self._retrieve_rag_context(user_message, use_rag=use_rag, rag_index=rag_index)
+        rag_context = self._build_rag_context(rag_snippets)
+        system_prompt = self._load_persona_text()
+        prompt = self._build_chat_prompt(
+            system_prompt=system_prompt,
+            history=history,
+            user_message=user_message,
+            rag_context=rag_context,
+        )
+        logger.info(
+            "Chat request: session_id=%r use_rag=%s rag_index=%r prompt_len=%d",
+            active_session_id or session_id,
+            use_rag,
+            rag_index,
+            len(prompt),
+        )
+
+        try:
+            reply_text = self.model_manager.generate(prompt, max_tokens=max_tokens)
+        except Exception as exc:
+            logger.exception("Model generation failed")
+            raise RuntimeError(f"Model generation failed: {exc}") from exc
+
+        if self.session_manager and active_session_id:
+            self._append_message(active_session_id, role="user", content=user_message)
+            self._append_message(active_session_id, role="assistant", content=reply_text)
+
+        return reply_text
+
+    def chat_once(
+        self,
+        user_message: str,
+        session_id: Optional[str] = None,
+        use_rag: bool = False,
+        rag_index: Optional[str] = None,
+        max_tokens: int = 256,
+    ) -> str:
+        """
+        Convenience wrapper primarily used by PrimusRuntime for single-turn chats. Delegates to
+        :meth:`chat` without adding extra logic.
+        """
+        return self.chat(
+            user_message=user_message,
+            session_id=session_id,
+            use_rag=use_rag,
+            rag_index=rag_index,
+            max_tokens=max_tokens,
+        )
+
+    def _retrieve_rag_context(
+        self,
+        query: str,
+        use_rag: bool,
+        rag_index: Optional[str],
+        topk: int = 3,
+    ) -> List[Tuple[str, str]]:
+        """Retrieve lightweight RAG snippets when enabled and available."""
+
+        if not (use_rag and rag_index and self.rag and hasattr(self.rag, "search")):
+            return []
+
+        snippets: List[Tuple[str, str]] = []
+        try:
+            hits = self.rag.search(query=query, scope=rag_index, topk=topk)
+            for hit in hits:
+                metadata = hit.get("metadata", {}) if isinstance(hit, dict) else {}
+                path = metadata.get("path") or metadata.get("source_file") or metadata.get("source") or rag_index
+                text = metadata.get("text") or hit.get("preview") or hit.get("text") or ""
+                preview = text[:240] + ("..." if len(text) > 240 else "")
+                score_val = hit.get("score") if isinstance(hit, dict) else None
+                score_val = score_val if score_val is not None else hit.get("distance") if isinstance(hit, dict) else None
+                score = f"{score_val:.4f}" if isinstance(score_val, (int, float)) else "?"
+                snippets.append((score, f"{path}: {preview}"))
+        except Exception:
+            logger.warning("RAG retrieval failed or index missing; proceeding without context.", exc_info=True)
+
+        return snippets
+
+    def _build_rag_context(self, rag_snippets: List[Tuple[str, str]]) -> str:
+        """Format retrieved RAG snippets into a labeled context block."""
+
+        if not rag_snippets:
+            return ""
+
+        rag_block_lines: List[str] = []
+        for score, snippet in rag_snippets:
+            rag_block_lines.append(f"- ({score}) {snippet}")
+        return "\n".join(rag_block_lines)
+
+    def _load_persona_text(self) -> str:
+        """Return the fixed Primus persona / system instruction block."""
+
+        default_persona = (
+            "You are Primus OS, a helpful, concise system assistant. Prefer to admit when "
+            "information is missing rather than guessing. When RAG context is provided, use it "
+            "carefully: quote or summarize relevant snippets, but do not invent configuration or "
+            "undocumented capabilities. If the context does not answer the question, say so "
+            "explicitly."
+        )
+        return default_persona
+
+    def _build_chat_prompt(
+        self,
+        system_prompt: str,
+        history: List[Dict[str, Any]],
+        user_message: str,
+        rag_context: Optional[str],
+    ) -> str:
+        """Compose the final prompt with persona, optional RAG context, history, and the new turn."""
+
+        prompt_parts: List[str] = [
+            "===== PRIMUS PERSONA =====",
+            system_prompt.strip(),
+            "==========================",
+        ]
+
+        if rag_context:
+            prompt_parts.extend(
+                [
+                    "===== RAG CONTEXT (may be relevant) =====",
+                    rag_context.strip(),
+                    "==========================================",
+                ]
+            )
+
+        filtered_history: List[Dict[str, Any]] = []
+        for msg in history:
+            text = msg.get("text") or msg.get("content") or ""
+            if text:
+                filtered_history.append({"role": msg.get("role", "user"), "content": text})
+
+        if filtered_history:
+            filtered_history = filtered_history[-10:]
+            prompt_parts.append("Conversation so far:")
+            for msg in filtered_history:
+                role_label = "Assistant" if msg.get("role") == "assistant" else "User"
+                prompt_parts.append(f"{role_label}: {msg.get('content', '')}")
+
+        prompt_parts.extend(
+            [
+                "===== New message =====",
+                f"User: {user_message}",
+                "Assistant:",
+            ]
+        )
+
+        return "\n".join(prompt_parts)
+
+    def _load_or_initialize_session(self, session_id: str) -> Tuple[str, List[Dict[str, Any]]]:
+        """Load session history or create a new session when missing using SessionManager."""
+
+        if not self.session_manager:
+            raise RuntimeError("SessionManager not initialized")
+
+        try:
+            if hasattr(self.session_manager, "ensure_session"):
+                session_ref = self.session_manager.ensure_session(session_id, owner="user", privacy="private")
+            else:
+                session_ref = self.session_manager.load_session(session_id)
+            history = list(session_ref.get("messages", [])) if isinstance(session_ref, dict) else []
+            active_session_id = session_ref.get("id", session_id) if isinstance(session_ref, dict) else session_id
+            return active_session_id, history
+        except Exception as exc:
+            should_init = SessionNotFound is None or isinstance(exc, SessionNotFound)
+            if not should_init:
+                logger.exception("Failed to load session %s; continuing without history.", session_id)
+                return session_id, []
+
+        try:
+            if hasattr(self.session_manager, "create_session"):
+                session_ref = self.session_manager.create_session(
+                    title=session_id, owner="user", privacy="private", session_id=session_id
+                )
+                session_id_resolved = session_ref.get("id", session_id) if isinstance(session_ref, dict) else session_id
+                return session_id_resolved, []
+        except Exception:
+            logger.exception("Failed to initialize new session %s", session_id)
+
+        return session_id, []
+
+    def _load_history(self, session_id: str) -> List[Dict[str, Any]]:
+        """
+        Helper to load a session history from SessionManager, if available.
+
+        Expected shape: list of {"role": "user"|"assistant", "content": str}
+        """
+
+        sm = getattr(self, "session_manager", None)
+        if sm is None:
+            return []
+
+        try:
+            history = sm.load_history(session_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("load_history failed for %r: %s", session_id, exc)
+            return []
+
+        return history or []
+
+    def _append_message(self, session_id: str, role: str, content: str) -> None:
+        """
+        Helper to append a single message into a session, if the SessionManager
+        exposes a suitable write API. Fails softly if no such API exists.
+        """
+
+        sm = getattr(self, "session_manager", None)
+        if sm is None:
+            return
+
+        msg = {"role": role, "content": content}
+        try:
+            sm.append_message(session_id, msg)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("append_message failed for %r: %s", session_id, exc)
+
+    def list_sessions(self) -> List[str]:
+        """
+        Return a sorted list of known session IDs.
+        """
+
+        if not self.session_manager:
+            return []
+
+        sessions: List[str] = []
+        try:
+            if hasattr(self.session_manager, "list_sessions"):
+                raw_sessions = self.session_manager.list_sessions()
+                for entry in raw_sessions:
+                    if isinstance(entry, dict):
+                        sid = entry.get("id")
+                        if sid:
+                            sessions.append(str(sid))
+                    elif isinstance(entry, str):
+                        sessions.append(entry)
+            else:
+                session_dir = self.system_root / "system" / "sessions"
+                if session_dir.exists():
+                    sessions = [p.stem for p in session_dir.glob("*.jsonl") if p.is_file()]
+        except Exception:
+            logger.exception("Failed to list sessions.")
+            return []
+
+        sessions = sorted(set(sessions))
+        logger.info("Listing sessions: %r", sessions)
+        return sessions
+
+    def get_session_history(self, session_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+        """
+        Return chat history for a session as a list of message dicts like
+        {"role": "user"|"assistant", "content": "..."}.
+
+        If limit is set, return only the most recent N messages.
+        """
+
+        messages = self._load_history(session_id)
+
+        if limit is not None:
+            messages = messages[-limit:]
+
+        history = [
+            {
+                "role": msg.get("role", "user"),
+                "content": msg.get("text", msg.get("content", "")),
+            }
+            for msg in messages
+            if isinstance(msg, dict)
+        ]
+        logger.info("Loaded session history for %r (len=%d)", session_id, len(history))
+        return history
+
+    def clear_session(self, session_id: str) -> None:
+        """
+        Delete/clear all history for the given session ID.
+
+        If the session does not exist, this is a no-op.
+        """
+
+        if not self.session_manager:
+            logger.info("No session manager available; nothing to clear for %r", session_id)
+            return
+
+        cleared = False
+        try:
+            if hasattr(self.session_manager, "delete_session"):
+                self.session_manager.delete_session(session_id)
+                cleared = True
+            else:
+                session_path = self.system_root / "system" / "sessions" / f"{session_id}.json"
+                if session_path.exists():
+                    session_path.unlink()
+                    cleared = True
+        except Exception:
+            logger.exception("Failed to clear session %r", session_id)
+            return
+
+        if cleared:
+            if hasattr(self.session_manager, "_cache") and session_id in getattr(self.session_manager, "_cache", {}):
+                try:
+                    del self.session_manager._cache[session_id]
+                except Exception:
+                    logger.debug("Failed to evict %r from session cache", session_id)
+            logger.info("Cleared session %r", session_id)
+        else:
+            logger.info("No session %r to clear", session_id)
+
+    # -------------------------
+    # Captain's Log (file-backed via CaptainsLogManager)
+    # -------------------------
+    def _get_captains_log_manager(self):
+        """
+        Internal helper to obtain a CaptainsLogManager instance, if available.
+
+        Returns:
+            CaptainsLogManager instance or None if the module is not available.
+        """
+
+        existing = getattr(self, "captains_log_manager", None)
+        if existing is not None:
+            return existing
+
+        try:
+            from captains_log.cl_manager import get_manager
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Captain's Log manager import failed: %s", exc)
+            return None
+
+        try:
+            manager = get_manager(system_root=self.system_root)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Captain's Log manager initialization failed: %s", exc)
+            return None
+
+        self.captains_log_manager = manager
+        return manager
+
+    def captains_log(self, action: str, text: str = "") -> str:
+        """
+        High-level Captain's Log API for the CLI.
+
+        Supported actions:
+          - "status"        : return a human-readable status line
+          - "write"         : append a journal entry (may require active mode)
+          - "read"          : return a human-readable summary of recent entries
+          - "clear"         : clear the journal (may require active mode)
+
+        This method MUST NOT raise if Captain's Log is unavailable or inactive.
+        It should always return a user-facing string.
+        """
+
+        manager = self._get_captains_log_manager()
+        if manager is None:
+            return "Captain's Log subsystem is not available."
+
+        action_normalized = (action or "").strip().lower()
+
+        try:
+            if action_normalized == "status":
+                active = getattr(manager, "active", False)
+                mode = getattr(manager, "mode", "unknown")
+                info: Dict[str, Any] | None = None
+                if hasattr(manager, "status") and callable(getattr(manager, "status")):
+                    info = manager.status()
+                elif hasattr(manager, "get_status") and callable(getattr(manager, "get_status")):
+                    info = manager.get_status()
+                if isinstance(info, dict):
+                    active = info.get("active", active)
+                    mode = info.get("mode", mode)
+                return f"Captain's Log status: active={active} mode={mode}"
+
+            if action_normalized == "write":
+                if not text.strip():
+                    return "No text provided for Captain's Log entry."
+                if not hasattr(manager, "add_journal_entry"):
+                    return "Captain's Log manager does not support writing entries."
+                entry = manager.add_journal_entry(text)
+                ts = None
+                entry_id = None
+                if isinstance(entry, dict):
+                    ts = entry.get("timestamp") or entry.get("ts")
+                    entry_id = entry.get("entry_id") or entry.get("id")
+                parts = []
+                if entry_id:
+                    parts.append(f"id={entry_id}")
+                if ts:
+                    parts.append(f"timestamp={ts}")
+                detail = f" ({', '.join(parts)})" if parts else ""
+                return f"Captain's Log: wrote entry{detail}."
+
+            if action_normalized == "read":
+                if not hasattr(manager, "list_journal_entries"):
+                    return "Captain's Log manager does not support reading entries."
+                entries = manager.list_journal_entries()
+                if not entries:
+                    return "Captain's Log is empty."
+                lines: List[str] = []
+                for idx, entry in enumerate(entries, start=1):
+                    ts = entry.get("timestamp", "unknown time") if isinstance(entry, dict) else "unknown time"
+                    txt = (entry.get("text") or "").strip() if isinstance(entry, dict) else ""
+                    lines.append(f"{idx:02d}. [{ts}] {txt}")
+                return "\n".join(lines)
+
+            if action_normalized == "clear":
+                if not hasattr(manager, "clear_journal"):
+                    return "Captain's Log manager does not support clearing entries."
+                manager.clear_journal()
+                return "Captain's Log: journal cleared."
+
+            return f"Unknown Captain's Log action: {action!r}."
+        except PermissionError as exc:
+            return str(exc)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("captains_log(%r) failed: %s", action_normalized, exc)
+            return f"Captain's Log error: {exc}"
+
+    # -------------------------
     # Simple helper: allow an agent to request a RAG search across allowed scopes
     # -------------------------
     def agent_search(self, agent_name: str, query: str, topk: int = 5) -> Dict[str, Any]:
@@ -634,11 +1155,18 @@ class PrimusCore:
 _primus_singleton: Optional[PrimusCore] = None
 
 
-def get_primus_core(singleton: bool = True) -> PrimusCore:
+def get_primus_core(
+    singleton: bool = True,
+    system_root: Optional[Path] = None,
+    captains_log_manager: "CaptainsLogManager | None" = None,
+) -> PrimusCore:
     global _primus_singleton
     if singleton and _primus_singleton:
         return _primus_singleton
-    pc = PrimusCore()
+    pc = PrimusCore(
+        system_root=system_root or SYSTEM_ROOT,
+        captains_log_manager=captains_log_manager,
+    )
     if singleton:
         _primus_singleton = pc
     return pc
