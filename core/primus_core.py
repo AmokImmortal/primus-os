@@ -115,7 +115,7 @@ class PrimusCore:
         except Exception as exc:  # noqa: BLE001
             logger.warning("append_message failed for %r: %s", session_id, exc)
 
-     def rag_index_path(self, name: str, path: str | "Path", recursive: bool = False) -> None:
+    def rag_index_path(self, name: str, path: str | "Path", recursive: bool = False) -> None:
         """
         Public helper to index a path into a named RAG index.
 
@@ -165,7 +165,7 @@ class PrimusCore:
             return self.rag_retriever.retrieve(name=name, query=query, top_k=top_k)
 
         return []
-    
+
     def _build_rag_context(
         self,
         rag_index: str,
