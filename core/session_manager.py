@@ -1,257 +1,229 @@
-# core/session_manager.py
 """
-Session Manager for PRIMUS OS
+core/session_manager.py
 
-This module provides persistent, per-session chat history storage. Histories are
-stored on disk so that conversations survive across CLI invocations. Each
-session is saved as a JSON Lines (JSONL) file containing message dictionaries
-with ``role`` and ``content`` keys (and optional ``ts`` metadata).
+Lightweight session history manager for PRIMUS OS.
+
+- Stores chat/session turns on disk under a given root directory.
+- No background threads, no network access.
+- Designed to be safely constructed by PrimusCore with:
+
+    SessionManager(session_root=os.path.join(system_root, "sessions"))
+
+API (stable surface for PrimusCore / CLI usage):
+
+    class SessionManager:
+        def __init__(self, session_root: str | Path, max_history: int = 100): ...
+
+        def create_session(self, session_id: str | None = None) -> str: ...
+        def list_sessions(self) -> list[str]: ...
+        def session_exists(self, session_id: str) -> bool: ...
+
+        def save_turn(self, session_id: str, role: str, content: str) -> None: ...
+        def load_history(
+            self,
+            session_id: str,
+            limit: int | None = None,
+        ) -> list[dict[str, str]]: ...
+
+        def delete_session(self, session_id: str) -> bool: ...
+
+    get_session_manager(session_root: str | Path | None = None) -> SessionManager
 """
 
 from __future__ import annotations
 
 import json
-import logging
-import threading
+import time
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-logger = logging.getLogger(__name__)
-
-DEFAULT_SESSIONS_DIR = Path("system") / "sessions"
-DEFAULT_SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-
-# Shared lock to keep disk writes safe across threads/processes
-_io_lock = threading.Lock()
-
-
-def _now_iso() -> str:
-    from datetime import datetime
-
-    return datetime.utcnow().isoformat() + "Z"
-
 
 class SessionManager:
-    """Manage chat sessions with simple JSONL persistence."""
+    """
+    Disk-backed session manager.
 
-    def __init__(self, session_root: Optional[str | Path] = None, max_history: int = 500):
-        root = Path(session_root) if session_root is not None else Path("system")
-        self.session_root: Path = root
-        self.sessions_dir: Path = (root / "sessions").resolve()
-        self.sessions_dir.mkdir(parents=True, exist_ok=True)
+    Storage layout (inside `session_root`):
+
+        sessions/
+            <session_id>.jsonl   # one JSON object per line:
+                                 #   {
+                                 #       "ts": float,
+                                 #       "role": "user" | "assistant" | ...,
+                                 #       "content": str
+                                 #   }
+    """
+
+    def __init__(self, session_root: str | Path, max_history: int = 100) -> None:
+        self.session_root = Path(session_root)
         self.max_history = max_history
 
+        # Directory where all sessions live
+        self.sessions_dir = self.session_root
+        self.sessions_dir.mkdir(parents=True, exist_ok=True)
+
     # ------------------------------------------------------------------
-    # Internal helpers
+    # Session identifiers / paths
     # ------------------------------------------------------------------
+
     def _session_path(self, session_id: str) -> Path:
-        path = self.sessions_dir / f"{session_id}.jsonl"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        return path
+        safe_id = session_id.replace("/", "_").replace("\\", "_")
+        return self.sessions_dir / f"{safe_id}.jsonl"
 
-    def _trim_history(self, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        if self.max_history and len(messages) > self.max_history:
-            return messages[-self.max_history :]
-        return messages
+    def create_session(self, session_id: Optional[str] = None) -> str:
+        """
+        Create a new session.
 
-    @staticmethod
-    def _normalize_messages(raw: Any, session_id: str) -> List[Dict[str, Any]]:
-        messages: List[Dict[str, Any]] = []
-        if isinstance(raw, list):
-            for item in raw:
-                if not isinstance(item, dict):
-                    continue
-                role = item.get("role") or item.get("who")
-                content = item.get("content")
-                if content is None:
-                    content = item.get("text")
-                if role and content is not None:
-                    entry = {"role": role, "content": content}
-                    if "ts" in item:
-                        entry["ts"] = item.get("ts")
-                    messages.append(entry)
-        elif isinstance(raw, dict):
-            nested = raw.get("messages", [])
-            messages = SessionManager._normalize_messages(nested, session_id)
-        else:
-            logger.warning(
-                "SessionManager: unsupported session payload for %s; returning empty history", session_id
-            )
-        return messages
+        If no session_id is provided, a UUID4 is generated.
+        Returns the session_id.
+        """
+        if session_id is None:
+            session_id = uuid.uuid4().hex
 
-    def _read_session_file(self, session_id: str) -> List[Dict[str, Any]]:
         path = self._session_path(session_id)
         if not path.exists():
-            return []
-        messages: List[Dict[str, Any]] = []
-        try:
-            with path.open("r", encoding="utf-8") as handle:
-                for line in handle:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        parsed = json.loads(line)
-                        messages.append(parsed)
-                    except Exception:
-                        logger.warning("SessionManager.load_history: failed to parse line in %s", path)
-                        continue
-            if messages:
-                return self._normalize_messages(messages, session_id)
-            # Legacy fallback: attempt to read a single JSON payload
-            try:
-                with path.open("r", encoding="utf-8") as handle:
-                    raw = json.load(handle)
-                return self._normalize_messages(raw, session_id)
-            except Exception:
-                return []
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("SessionManager.load_history: failed to parse %s: %s", path, exc)
-            return []
+            # Touch the file so it exists, but keep it empty initially
+            path.touch()
 
-    def _write_session_file(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
-        messages = self._trim_history(messages)
-        path = self._session_path(session_id)
-        tmp_path = path.with_suffix(".jsonl.tmp")
-        try:
-            with _io_lock:
-                with tmp_path.open("w", encoding="utf-8") as handle:
-                    for msg in messages:
-                        json.dump(msg, handle, ensure_ascii=False)
-                        handle.write("\n")
-                tmp_path.replace(path)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("SessionManager: failed to write %s: %s", path, exc)
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
-    def load_history(self, session_id: str) -> List[Dict[str, Any]]:
-        """Return stored history for a session, or an empty list if missing."""
-        history = self._read_session_file(session_id)
-        if history and len(history) > self.max_history:
-            history = self._trim_history(history)
-            try:
-                self._write_session_file(session_id, history)
-            except Exception:
-                logger.debug("SessionManager: failed to persist trimmed history for %s", session_id)
-        if history:
-            logger.debug("SessionManager.load_history: loaded %d messages for %s", len(history), session_id)
-        return history
-
-    def load_session(self, session_id: str) -> List[Dict[str, Any]]:
-        """Compatibility wrapper that delegates to ``load_history``."""
-        try:
-            history = self.load_history(session_id)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("load_session failed for %r: %s", session_id, exc)
-            return []
-        return history or []
-
-    def append_message(self, session_id: str, msg: Dict[str, Any]) -> None:
-        """Append a message and persist the session, trimming if needed."""
-        if not isinstance(msg, dict):
-            logger.debug("SessionManager.append_message: msg must be dict; skipping for %s", session_id)
-            return
-
-        role = msg.get("role")
-        content = msg.get("content")
-        if role is None or content is None:
-            logger.debug("SessionManager.append_message: incomplete message for %s; skipping", session_id)
-            return
-
-        history = self.load_session(session_id)
-        entry = {"role": role, "content": content, "ts": msg.get("ts", _now_iso())}
-        history.append(entry)
-        try:
-            self._write_session_file(session_id, history)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("SessionManager.append_message failed for %r: %s", session_id, exc)
-            return
-        logger.debug(
-            "SessionManager.append_message: session=%s total_messages=%d", session_id, len(history)
-        )
-
-    def save_history(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
-        self._write_session_file(session_id, messages)
-
-    def delete_session(self, session_id: str) -> None:
-        path = self._session_path(session_id)
-        try:
-            if path.exists():
-                path.unlink()
-                logger.info("SessionManager.delete_session: removed %s", path)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("SessionManager.delete_session: failed to delete %s: %s", path, exc)
-
-    def clear_session(self, session_id: str) -> None:
-        """Compatibility wrapper to delete all persisted data for a session."""
-
-        try:
-            self.delete_session(session_id)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("clear_session failed for %r: %s", session_id, exc)
-
-    def list_sessions(self) -> List[str]:
-        sessions = []
-        if not self.sessions_dir.exists():
-            return sessions
-        for path in self.sessions_dir.glob("*.jsonl"):
-            sessions.append(path.stem)
-        return sorted(sessions)
+        return session_id
 
     def session_exists(self, session_id: str) -> bool:
         return self._session_path(session_id).exists()
 
-    # ------------------------------------------------------------------
-    # Legacy/compat helpers (lightweight stubs retained for compatibility)
-    # ------------------------------------------------------------------
-    def ensure_session(self, session_id: str, owner: str = "user", privacy: str = "private") -> Dict[str, Any]:
-        # owner and privacy currently informational only
-        if not self.session_exists(session_id):
-            self._write_session_file(session_id, [])
-        return {"id": session_id, "owner": owner, "privacy": privacy, "messages": []}
+    def list_sessions(self) -> List[str]:
+        """
+        Return a list of known session IDs (based on files in sessions_dir).
+        """
+        ids: List[str] = []
+        for p in self.sessions_dir.glob("*.jsonl"):
+            ids.append(p.stem)
+        return sorted(ids)
 
-    def create_session(
-        self,
-        title: str,
-        owner: str = "user",
-        privacy: str = "private",
-        meta: Optional[Dict[str, Any]] = None,
-        session_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        sid = session_id or title
-        self._write_session_file(sid, [])
-        return {
-            "id": sid,
-            "title": title,
-            "owner": owner,
-            "privacy": privacy,
-            "meta": meta or {},
-            "messages": [],
+    # ------------------------------------------------------------------
+    # History storage
+    # ------------------------------------------------------------------
+
+    def save_turn(self, session_id: str, role: str, content: str) -> None:
+        """
+        Append a single turn to the session history.
+
+        No background activity; simple append-only write.
+        """
+        if not self.session_exists(session_id):
+            self.create_session(session_id)
+
+        path = self._session_path(session_id)
+        record: Dict[str, Any] = {
+            "ts": time.time(),
+            "role": role,
+            "content": content,
         }
 
-    def add_message(
-        self,
-        session_id: str,
-        role: str,
-        who: str,
-        text: str,
-        ts: Optional[str] = None,
-        allow_agent_read_cross: bool = True,
-    ) -> Dict[str, Any]:
-        msg = {"role": role, "content": text, "ts": ts or _now_iso(), "who": who}
-        self.append_message(session_id, msg)
-        return msg
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
-    def get_messages(self, session_id: str, start: int = 0, end: Optional[int] = None) -> List[Dict[str, Any]]:
-        history = self.load_history(session_id)
-        return history[start:end]
+        # Optional: enforce max_history by trimming oldest entries
+        if self.max_history > 0:
+            self._trim_history(path)
 
-    def clear_all_sessions(self) -> None:
-        for sid in self.list_sessions():
-            self.delete_session(sid)
+    def _trim_history(self, path: Path) -> None:
+        """
+        Keep at most `max_history` lines in the JSONL file.
+        If max_history <= 0, no trimming is performed.
+        """
+        if self.max_history <= 0 or not path.exists():
+            return
+
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                lines = f.readlines()
+        except OSError:
+            return
+
+        if len(lines) <= self.max_history:
+            return
+
+        # Keep only the last max_history lines
+        lines = lines[-self.max_history :]
+
+        try:
+            with path.open("w", encoding="utf-8") as f:
+                f.writelines(lines)
+        except OSError:
+            # If trimming fails, we silently ignore; history remains larger.
+            return
+
+    def load_history(self, session_id: str, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """
+        Load the session history as a list of records:
+            { "ts": float, "role": str, "content": str }
+
+        If `limit` is provided, returns only the most recent `limit` turns.
+        """
+        path = self._session_path(session_id)
+        if not path.exists():
+            return []
+
+        records: List[Dict[str, Any]] = []
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                        if isinstance(obj, dict):
+                            records.append(obj)
+                    except json.JSONDecodeError:
+                        # Skip corrupted lines silently.
+                        continue
+        except OSError:
+            return []
+
+        if limit is not None and limit > 0:
+            return records[-limit:]
+
+        return records
+
+    # ------------------------------------------------------------------
+    # Destructive operations
+    # ------------------------------------------------------------------
+
+    def delete_session(self, session_id: str) -> bool:
+        """
+        Delete a session file from disk.
+        Returns True if a file was removed, False otherwise.
+        """
+        path = self._session_path(session_id)
+        if path.exists():
+            try:
+                path.unlink()
+                return True
+            except OSError:
+                return False
+        return False
 
 
-# Single global manager
-session_manager = SessionManager()
+# ----------------------------------------------------------------------
+# Singleton-style accessor (optional, but convenient)
+# ----------------------------------------------------------------------
+
+_global_session_manager: Optional[SessionManager] = None
+
+
+def get_session_manager(session_root: Optional[str | Path] = None) -> SessionManager:
+    """
+    Return a process-global SessionManager instance.
+
+    If not yet created, a new one is initialized. If `session_root` is not
+    provided on first call, it defaults to "./sessions" relative to CWD.
+    """
+    global _global_session_manager
+
+    if _global_session_manager is None:
+        if session_root is None:
+            session_root = Path.cwd() / "sessions"
+        _global_session_manager = SessionManager(session_root=session_root)
+
+    return _global_session_manager
