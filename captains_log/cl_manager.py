@@ -1,114 +1,147 @@
-from __future__ import annotations
+"""Captain's Log Master Root mode manager (framework only).
 
-import json
-import logging
-from datetime import datetime, timezone
+This module provides a minimal, import-safe Captain's Log manager that wraps the
+shared state object exposed by ``cl_state``. It intentionally avoids
+implementing journaling, RAG, encryption, or any file I/O in this phase. The
+purpose is to offer a stable API for the runtime and future subsystems while
+remaining side-effect free.
+"""
+
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Optional, List, Dict, Any
 
-logger = logging.getLogger("captains_log")
+from .cl_state import CaptainsLogState
+from .cl_journal import JournalStore
+from .cl_rag import CaptainsLogRAG
 
 
 class CaptainsLogManager:
-    """File-backed Captain's Log manager using JSONL storage."""
+    """
+    Controls Captain’s Log Master Root Mode and its private journal + RAG.
 
-    def __init__(self, log_path: Path, max_entries: int = 1000) -> None:
-        self.log_path = Path(log_path).resolve()
-        self.max_entries = max_entries
-        try:
-            self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Failed to create Captain's Log directory %s: %s", self.log_path.parent, exc)
+    Rules:
+    - All journal and RAG operations require Captain’s Log mode to be active.
+    - No journal text or RAG contents are exposed to other subsystems.
+    - No automatic logging of sensitive content.
+    """
 
-    def append_entry(self, text: str, level: str = "info") -> None:
-        """Append a single entry to the Captain's Log."""
+    def __init__(self) -> None:
+        # Mode state
+        self.state = CaptainsLogState()
 
-        if not text or not text.strip():
-            return
+        # Private journal storage (on disk, JSONL)
+        self.journal = JournalStore(Path("private/captains_log/journal.jsonl"))
 
-        entry: Dict[str, Any] = {
-            "ts": datetime.utcnow().replace(tzinfo=timezone.utc).isoformat().replace("+00:00", "Z"),
-            "text": text,
-            "level": level,
+        # Private in-memory RAG for Captain's Log
+        self.rag = CaptainsLogRAG(self.state)
+
+    # -------------------------------------------------
+    # Mode control
+    # -------------------------------------------------
+    def enter(self) -> bool:
+        self.state.enter()
+        return True
+
+    def exit(self) -> bool:
+        self.state.exit()
+        return True
+
+    def is_active(self) -> bool:
+        return bool(getattr(self.state, "active", False))
+
+    def current_mode(self) -> str:
+        return "captains_log" if self.is_active() else "normal"
+
+    def get_status(self) -> Dict[str, Any]:
+        """
+        Minimal status used by bootup tests and diagnostics.
+        Does NOT include any journal or RAG contents.
+        """
+        return {
+            "status": "ok",
+            "active": self.is_active(),
+            "mode": self.current_mode(),
         }
-        try:
-            with self.log_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(entry, ensure_ascii=False))
-                handle.write("\n")
-            self._trim()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Failed to append Captain's Log entry: %s", exc)
 
-    def read_entries(self, limit: Optional[int] = None) -> List[Dict[str, Any]]:
-        """Read recent entries from the log, returning up to ``limit`` results."""
+    # -------------------------------------------------
+    # Journal operations
+    # -------------------------------------------------
+    def _ensure_active(self) -> None:
+        if not self.is_active():
+            raise PermissionError("Captain’s Log operations require Captain’s Log mode to be active.")
 
-        if not self.log_path.exists():
-            return []
+    def add_journal_entry(self, text: str) -> Dict[str, Any]:
+        """
+        Add a new journal entry and ingest it into the private RAG memory.
 
-        entries: List[Dict[str, Any]] = []
-        try:
-            with self.log_path.open("r", encoding="utf-8") as handle:
-                for line in handle:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entries.append(json.loads(line))
-                    except json.JSONDecodeError as exc:  # noqa: BLE001
-                        logger.warning("Skipping malformed Captain's Log line in %s: %s", self.log_path, exc)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Failed to read Captain's Log entries: %s", exc)
-            return []
+        Returns the full entry dict (id, timestamp, mode, text).
+        """
+        self._ensure_active()
+        entry_id = self.journal.add_entry(text, mode="master_root")
 
-        if limit is None or limit < 0:
-            return entries
-        return entries[-limit:]
+        # Fetch the new entry so we can mirror it into RAG.
+        entries = self.journal.list_entries()
+        entry: Dict[str, Any] | None = None
+        for e in entries:
+            if e.get("id") == entry_id:
+                entry = e
+                break
 
-    def clear(self) -> None:
-        """Remove all stored Captain's Log entries."""
+        if entry is not None:
+            # Ingest into private Captain's Log RAG memory.
+            self.rag.ingest_entry(entry)
 
-        try:
-            if self.log_path.exists():
-                self.log_path.unlink()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Failed to clear Captain's Log: %s", exc)
+        return entry or {"id": entry_id, "text": text, "mode": "master_root"}
 
-    # Backwards-compatibility wrappers ------------------------------------
-    def write_entry(self, text: str, *, level: str = "INFO", meta: Optional[Dict[str, Any]] = None) -> None:
-        del meta  # meta is ignored in this minimal implementation
-        self.append_entry(text=text, level=level)
+    def list_journal_entries(self) -> List[Dict[str, Any]]:
+        """
+        List all journal entries (metadata + text).
+        Only allowed in Captain’s Log mode.
+        """
+        self._ensure_active()
+        return self.journal.list_entries()
 
-    def read_recent(self, limit: int = 20) -> List[Dict[str, Any]]:
-        return self.read_entries(limit=limit)
+    def clear_journal(self) -> None:
+        """
+        Clear ALL journal data and the associated RAG memory.
+        Only allowed in Captain’s Log mode.
+        """
+        self._ensure_active()
+        self.journal.clear()
+        self.rag.clear()
 
-    # Internal helpers -----------------------------------------------------
-    def _trim(self) -> None:
-        if self.max_entries is None or self.max_entries <= 0:
-            return
-        entries = self.read_entries()
-        if len(entries) <= self.max_entries:
-            return
-        trimmed = entries[-self.max_entries :]
-        try:
-            with self.log_path.open("w", encoding="utf-8") as handle:
-                for entry in trimmed:
-                    handle.write(json.dumps(entry, ensure_ascii=False))
-                    handle.write("\n")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Failed to trim Captain's Log entries: %s", exc)
+    # -------------------------------------------------
+    # RAG operations (private to Captain's Log)
+    # -------------------------------------------------
+    def search_rag(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
+        """
+        Search the Captain's Log private RAG memory.
+
+        Phase 1: naive text search implemented by CaptainsLogRAG.
+        """
+        self._ensure_active()
+        return self.rag.search(query, limit=limit)
+
+    def rebuild_rag_from_journal(self) -> None:
+        """
+        Rebuild the private Captain's Log RAG memory from all journal entries.
+        Useful if the in-memory RAG is reset or implementation changes.
+        """
+        self._ensure_active()
+        entries = self.journal.list_entries()
+        self.rag.clear()
+        if entries:
+            self.rag.bulk_ingest(entries)
 
 
+# -------------------------------------------------
+# Singleton accessor
+# -------------------------------------------------
 _manager: Optional[CaptainsLogManager] = None
 
 
-def get_manager(system_root: Path | str | None = None) -> CaptainsLogManager:
-    """Return a singleton CaptainsLogManager rooted under the system logs directory."""
-
+def get_manager() -> CaptainsLogManager:
     global _manager
-    if _manager is not None:
-        return _manager
-
-    root = Path(system_root).resolve() if system_root is not None else Path(".").resolve()
-    log_path = root / "logs" / "captains_log.jsonl"
-    _manager = CaptainsLogManager(log_path=log_path, max_entries=1000)
+    if _manager is None:
+        _manager = CaptainsLogManager()
     return _manager
