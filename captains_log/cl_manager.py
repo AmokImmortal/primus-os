@@ -7,6 +7,7 @@ purpose is to offer a stable API for the runtime and future subsystems while
 remaining side-effect free.
 """
 
+import os
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
@@ -34,6 +35,10 @@ class CaptainsLogManager:
 
         # Private in-memory RAG for Captain's Log
         self.rag = CaptainsLogRAG(self.state)
+
+        # Developer override: allow enabling Captain's Log mode in local environments
+        if os.environ.get("PRIMUS_CAPTAINS_LOG_DEV") == "1":
+            self.state.active = True
 
     # -------------------------------------------------
     # Mode control

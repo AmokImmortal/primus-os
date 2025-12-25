@@ -100,17 +100,49 @@ def cli_captains_log(args: argparse.Namespace) -> None:
     Actions:
       - write <text>
       - read
+      - clear
     """
     runtime = PrimusRuntime()
     core = runtime._ensure_core()  # type: ignore[attr-defined]
 
-    handler = getattr(core, "captains_log", None)
-    if not callable(handler):
-        print("Captain's Log API is not available on PrimusCore.")
+    has_api = all(
+        hasattr(core, attr) for attr in ("captains_log_write", "captains_log_read", "captains_log_clear")
+    )
+    if not has_api:
+        print("Captain's Log is not available in this mode.")
         return
 
-    result = handler(args.action, args.text or "")
-    print(result)
+    try:
+        if args.action == "write":
+            if not args.text:
+                print("No text provided for write action.")
+                return
+            entry = core.captains_log_write(args.text)
+            if entry:
+                entry_id = entry.get("id", "<unknown>")
+                ts = entry.get("ts") or entry.get("timestamp", "")
+                print(f"[OK] Captain's Log entry recorded (id={entry_id}, ts={ts})")
+            else:
+                print("Captain's Log is disabled. Enable it in your security/captains_log settings or dev override.")
+        elif args.action == "read":
+            entries = core.captains_log_read(limit=args.limit)
+            if not entries:
+                print("No Captain's Log entries found (or Captain's Log is disabled).")
+                return
+            print(f"Captain's Log entries (showing up to {len(entries)}):")
+            for idx, entry in enumerate(entries, 1):
+                ts = entry.get("ts") or entry.get("timestamp", "")
+                text = (entry.get("text") or "").strip()
+                if len(text) > 200:
+                    text = text[:200] + "...[truncated]"
+                print(f"{idx:02d}) {ts} {text}")
+        elif args.action == "clear":
+            core.captains_log_clear()
+            print("Captain's Log cleared.")
+    except PermissionError:
+        print("Captain's Log is disabled. Enable it in your security/captains_log settings or dev override.")
+    except Exception as exc:  # noqa: BLE001
+        print(f"[ERROR] Captain's Log operation failed: {exc}")
 
 
 # --------------------------------------------------------------------------- #
@@ -205,7 +237,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_cl.add_argument(
         "action",
-        choices=["write", "read"],
+        choices=["write", "read", "clear"],
         help="Action to perform on Captain's Log",
     )
     p_cl.add_argument(
@@ -213,6 +245,12 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="?",
         default="",
         help="Text to write (for 'write' action); ignored for 'read'",
+    )
+    p_cl.add_argument(
+        "--limit",
+        type=int,
+        default=50,
+        help="Maximum entries to show for 'read' (default: 50)",
     )
     p_cl.set_defaults(func=cli_captains_log)
 
