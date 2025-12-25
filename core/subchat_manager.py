@@ -1,127 +1,96 @@
-# /core/subchat_manager.py
-# Manages creation, isolation, permissions, security, and state of all sub-chats.
+from __future__ import annotations
 
-import uuid
-from datetime import datetime
+import json
+import logging
+from pathlib import Path
+from typing import Dict, List, Optional
 
-from core.subchat_isolation import SubchatIsolationRules
-from core.agent_permissions import AgentPermissions
-from core.agent_interaction_logger import AgentInteractionLogger
-from core.security_enforcer import SecurityEnforcer
+logger = logging.getLogger(__name__)
+
 
 class SubchatManager:
     """
-    Creates, tracks, isolates, secures, and manages sub-chat instances.
-    Acts as the authoritative controller for all branching conversations.
+    Minimal SubChat manager that discovers JSON descriptors under subchats/.
     """
 
-    def __init__(self):
-        self.subchats = {}  # subchat_id -> metadata + rules + permissions
-        self.logger = AgentInteractionLogger()
-        self.security = SecurityEnforcer()
+    REQUIRED_FIELDS = {"id", "name", "description", "system_prompt"}
 
-    def create_subchat(self, parent_agent: str, purpose: str, permissions: dict = None):
-        """
-        Create a new subchat with isolation rules and permissions.
-        """
-        subchat_id = str(uuid.uuid4())
+    def __init__(self, system_root: str | Path) -> None:
+        self.system_root = Path(system_root)
+        self.subchats_dir = self.system_root / "subchats"
 
-        isolation = SubchatIsolationRules(
-            access_parent_memory=False,
-            allow_parent_logs=False,
-            parent_context_limit=50
-        )
+    def _iter_subchat_files(self) -> List[Path]:
+        if not self.subchats_dir.exists():
+            return []
+        return sorted(self.subchats_dir.glob("*.json"))
 
-        perms = AgentPermissions(permissions if permissions else {})
+    def _load_subchat(self, path: Path) -> Optional[Dict[str, str]]:
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to load subchat %s: %s", path, exc)
+            return None
 
-        metadata = {
-            "id": subchat_id,
-            "parent_agent": parent_agent,
-            "purpose": purpose,
-            "created_at": datetime.utcnow().isoformat(),
-            "isolation": isolation,
-            "permissions": perms,
-            "messages": []
-        }
+        if not isinstance(data, dict):
+            logger.warning("Subchat file %s is not a JSON object; skipping.", path)
+            return None
 
-        self.subchats[subchat_id] = metadata
+        data.setdefault("id", path.stem)
+        missing = self.REQUIRED_FIELDS - set(k for k, v in data.items() if v)
+        if missing:
+            logger.warning("Subchat %s missing required fields %s; skipping.", path, missing)
+            return None
 
-        self.logger.log_event(
-            agent=parent_agent,
-            action="SUBCHAT_CREATED",
-            details={"subchat_id": subchat_id, "purpose": purpose}
-        )
+        return data
 
-        return subchat_id
+    def list_subchats(self) -> List[Dict[str, str]]:
+        subchats: List[Dict[str, str]] = []
+        try:
+            for path in self._iter_subchat_files():
+                data = self._load_subchat(path)
+                if data is None:
+                    continue
+                # Only expose summary fields for listings
+                subchats.append(
+                    {
+                        "id": data.get("id", path.stem),
+                        "name": data.get("name", ""),
+                        "description": data.get("description", ""),
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Subchat discovery failed: %s", exc)
+            return []
+        return subchats
 
-    def add_message(self, subchat_id: str, sender: str, message: str):
-        """
-        Add a message to the subchat while enforcing all isolation + security rules.
-        """
+    def get_subchat(self, subchat_id: str) -> Optional[Dict[str, str]]:
+        try:
+            for path in self._iter_subchat_files():
+                data = self._load_subchat(path)
+                if data is None:
+                    continue
+                candidate_id = data.get("id") or path.stem
+                if candidate_id == subchat_id or path.stem == subchat_id:
+                    return data
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Subchat lookup failed for %s: %s", subchat_id, exc)
+            return None
+        return None
 
-        if subchat_id not in self.subchats:
-            raise ValueError(f"Subchat {subchat_id} does not exist.")
-
-        subchat = self.subchats[subchat_id]
-
-        # Security gate
-        if not self.security.allow_message(sender, message, subchat["permissions"]):
-            raise PermissionError("Message blocked by security layer.")
-
-        # Isolation enforcement
-        sanitized_message = subchat["isolation"].apply_isolation(message)
-
-        subchat["messages"].append({
-            "timestamp": datetime.utcnow().isoformat(),
-            "sender": sender,
-            "content": sanitized_message
-        })
-
-        self.logger.log_message(
-            agent=sender,
-            subchat_id=subchat_id,
-            message=sanitized_message
-        )
-
-        return True
-
-    def get_messages(self, subchat_id: str):
-        """
-        Retrieve message history for UI or internal use.
-        """
-        if subchat_id not in self.subchats:
-            raise ValueError(f"Subchat {subchat_id} does not exist.")
-
-        return self.subchats[subchat_id]["messages"]
-
-    def close_subchat(self, subchat_id: str):
-        """
-        Close and archive the subchat.
-        """
-        if subchat_id not in self.subchats:
-            raise ValueError(f"Subchat {subchat_id} does not exist.")
-
-        subchat = self.subchats[subchat_id]
-
-        self.logger.log_event(
-            agent=subchat["parent_agent"],
-            action="SUBCHAT_CLOSED",
-            details={"subchat_id": subchat_id}
-        )
-
-        del self.subchats[subchat_id]
-        return True
-
-    def list_subchats(self):
-        """
-        Return a summary listing of all active subchats.
-        """
-        return [
-            {
-                "id": sc["id"],
-                "parent_agent": sc["parent_agent"],
-                "purpose": sc["purpose"],
-                "created_at": sc["created_at"],
+    def status(self) -> Dict[str, object]:
+        try:
+            subchats = self.list_subchats()
+            count = len(subchats)
+            return {
+                "status": "ok",
+                "configured": bool(count),
+                "count": count,
             }
-            for sc in self.subchats.values()
-        ]
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Subchat status check failed: %s", exc)
+            return {"status": "error", "configured": False, "count": 0}
+
+
+def get_subchat_manager(system_root: str | Path) -> SubchatManager:
+    return SubchatManager(system_root)

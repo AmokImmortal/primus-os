@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from core.agent_manager import AgentManager
 from core.model_manager import ModelManager
@@ -50,6 +50,7 @@ class PrimusCore:
 
         self.initialized = False
         self.captains_log_manager = None
+        self.subchat_manager = None
 
     # ------------------------------------------------------------------ #
     # Lifecycle                                                          #
@@ -132,15 +133,20 @@ class PrimusCore:
             recursive,
         )
 
-        # Prefer a rag_manager if it exists and exposes index_path
-        rm = getattr(self, "rag_manager", None)
-        if rm is not None and hasattr(rm, "index_path"):
-            rm.index_path(name=name, path=path_str, recursive=recursive)
-            return
+        try:
+            # Prefer a rag_manager if it exists and exposes index_path
+            rm = getattr(self, "rag_manager", None)
+            if rm is not None and hasattr(rm, "index_path"):
+                rm.index_path(name=name, path=path_str, recursive=recursive)
+                return
 
-        # Fallback: use the low-level indexer
-        if hasattr(self, "rag_indexer"):
-            self.rag_indexer.index_path(name=name, path=path_str, recursive=recursive)
+            # Fallback: use the low-level indexer
+            if hasattr(self, "rag_indexer"):
+                self.rag_indexer.index_path(name=name, path=path_str, recursive=recursive)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "RAG index request failed for name=%r path=%r: %s", name, path_str, exc
+            )
 
     def rag_retrieve(self, name: str, query: str, top_k: int = 3) -> List[Tuple[float, Dict[str, Any]]]:
         """
@@ -156,12 +162,17 @@ class PrimusCore:
             top_k,
         )
 
-        rm = getattr(self, "rag_manager", None)
-        if rm is not None and hasattr(rm, "retrieve"):
-            return rm.retrieve(name=name, query=query, top_k=top_k)
+        try:
+            rm = getattr(self, "rag_manager", None)
+            if rm is not None and hasattr(rm, "retrieve"):
+                return rm.retrieve(name=name, query=query, top_k=top_k)
 
-        if hasattr(self, "rag_retriever"):
-            return self.rag_retriever.retrieve(name=name, query=query, top_k=top_k)
+            if hasattr(self, "rag_retriever"):
+                return self.rag_retriever.retrieve(name=name, query=query, top_k=top_k)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "RAG retrieve failed for index=%r query_len=%d: %s", name, len(query), exc
+            )
 
         return []
 
@@ -248,6 +259,11 @@ class PrimusCore:
         try:
             sm = getattr(self, "session_manager", None)
             if sm is not None:
+                exists_fn = getattr(sm, "session_exists", None)
+                if callable(exists_fn) and not exists_fn(session_id):
+                    logger.info("clear_session: session %r not found; nothing to clear.", session_id)
+                    return
+
                 for attr in ("clear_session", "delete_session", "remove_session"):
                     func = getattr(sm, attr, None)
                     if callable(func):
@@ -354,7 +370,11 @@ class PrimusCore:
             len(prompt),
         )
 
-        reply = self.model_manager.generate(prompt, max_tokens=max_tokens)
+        try:
+            reply = self.model_manager.generate(prompt, max_tokens=max_tokens)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ModelManager.generate failed for session %r: %s", session_id, exc)
+            reply = f"[error] Unable to generate reply: {exc}"
 
         # Persist updated history
         self._append_message(session_id, "assistant", reply)
@@ -427,6 +447,116 @@ class PrimusCore:
             logger.warning("Captain's Log clear blocked (inactive): %s", exc)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Captain's Log clear failed: %s", exc)
+
+    # ------------------------------------------------------------------ #
+    # SubChat                                                            #
+    # ------------------------------------------------------------------ #
+
+    def _get_subchat_manager(self):
+        return getattr(self, "subchat_manager", None)
+
+    def get_subchat_status(self) -> Dict[str, Any]:
+        manager = self._get_subchat_manager()
+        if manager is None:
+            return {"status": "missing"}
+        try:
+            return manager.status()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Subchat status check failed: %s", exc)
+            return {"status": "error"}
+
+    def list_subchats(self) -> List[Dict[str, Any]]:
+        manager = self._get_subchat_manager()
+        if manager is None:
+            return []
+        try:
+            return manager.list_subchats()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Subchat list failed: %s", exc)
+            return []
+
+    def run_subchat(
+        self,
+        subchat_id: str,
+        user_message: str,
+        session_id: str = "cli",
+        max_tokens: int = 256,
+    ) -> str:
+        manager = self._get_subchat_manager()
+        if manager is None:
+            logger.warning("SubChat manager unavailable; run_subchat skipped.")
+            return "SubChat system is not available."
+
+        try:
+            subchat = manager.get_subchat(subchat_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("SubChat lookup failed for %r: %s", subchat_id, exc)
+            subchat = None
+
+        if not subchat:
+            return f"Unknown subchat '{subchat_id}'."
+
+        # Prepare prompt components
+        subchat_prompt = subchat.get("system_prompt", "").strip()
+        subchat_name = subchat.get("name", subchat_id)
+        subchat_desc = subchat.get("description", "")
+
+        base_system_prompt = (
+            "You are Primus OS, a helpful, concise system assistant. "
+            "Use the provided context when it is relevant, but never fabricate facts."
+        )
+        system_prompt = subchat_prompt
+        if base_system_prompt:
+            system_prompt = subchat_prompt + "\n\n" + base_system_prompt
+
+        history = self._load_history(session_id)
+        self._append_message(session_id, "user", user_message)
+
+        history_lines: List[str] = []
+        for msg in history[-10:]:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if not content:
+                continue
+            if role == "assistant":
+                history_lines.append(f"Assistant: {content}")
+            else:
+                history_lines.append(f"User: {content}")
+
+        parts: List[str] = [system_prompt]
+
+        if subchat_name or subchat_desc:
+            parts.append("")
+            parts.append(f"Subchat: {subchat_name}")
+            if subchat_desc:
+                parts.append(subchat_desc)
+
+        if history_lines:
+            parts.append("")
+            parts.append("Conversation so far:")
+            parts.append("\n".join(history_lines))
+
+        parts.append("")
+        parts.append(f"User: {user_message}")
+        parts.append("Assistant:")
+
+        prompt = "\n".join(parts)
+
+        logger.info(
+            "SubChat request: subchat_id=%r session_id=%r prompt_len=%d",
+            subchat_id,
+            session_id,
+            len(prompt),
+        )
+
+        try:
+            reply = self.model_manager.generate(prompt, max_tokens=max_tokens)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ModelManager.generate failed for subchat %r: %s", subchat_id, exc)
+            reply = f"[error] Unable to generate reply: {exc}"
+
+        self._append_message(session_id, "assistant", reply)
+        return reply
 
     # ------------------------------------------------------------------ #
     # Core self-test (used by PrimusRuntime.run_bootup_test)            #
