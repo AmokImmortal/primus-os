@@ -33,10 +33,13 @@ API (stable surface for PrimusCore / CLI usage):
 from __future__ import annotations
 
 import json
+import logging
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 class SessionManager:
@@ -186,9 +189,43 @@ class SessionManager:
 
         return records
 
+    def load_session(self, session_id: str) -> List[Dict[str, Any]]:
+        """
+        Compatibility wrapper expected by PrimusCore.
+
+        Returns a simplified history in the shape:
+            [{"role": str, "content": str}, ...]
+        """
+        try:
+            records = self.load_history(session_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("load_session failed for %r: %s", session_id, exc)
+            return []
+
+        messages: List[Dict[str, Any]] = []
+        for rec in records:
+            role = rec.get("role", "")
+            content = rec.get("content", "")
+            messages.append({"role": role, "content": content})
+        return messages
+
     # ------------------------------------------------------------------
     # Destructive operations
     # ------------------------------------------------------------------
+
+    def append_message(self, session_id: str, message: Dict[str, Any]) -> None:
+        """
+        Compatibility wrapper expected by PrimusCore.
+
+        Appends a single message dict to the on-disk history, reusing
+        save_turn to keep trimming/max_history behavior consistent.
+        """
+        try:
+            role = message.get("role", "user")
+            content = message.get("content", "")
+            self.save_turn(session_id, role=role, content=str(content))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("append_message failed for %r: %s", session_id, exc)
 
     def delete_session(self, session_id: str) -> bool:
         """
