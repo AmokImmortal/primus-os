@@ -252,10 +252,19 @@ def main() -> None:
     planner_status = ttk.Label(planner_frame, text="", foreground="gray")
     planner_status.grid(row=2, column=1, sticky="e")
 
-    ttk.Label(planner_frame, text="Planner result:").grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
+    # Checkbox: save planner result to Captain's Log (UI only for now)
+    save_to_log_var = BooleanVar(value=True)
+    save_to_log_check = ttk.Checkbutton(
+        planner_frame,
+        text="Save planner result to Captain's Log",
+        variable=save_to_log_var,
+    )
+    save_to_log_check.grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
+    ttk.Label(planner_frame, text="Planner result:").grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
     planner_output = ScrolledText(planner_frame, wrap="word", height=12, state=DISABLED)
-    planner_output.grid(row=4, column=0, columnspan=2, sticky="nsew", pady=(4, 0))
-    planner_frame.rowconfigure(4, weight=1)
+    planner_output.grid(row=5, column=0, columnspan=2, sticky="nsew", pady=(4, 0))
+    planner_frame.rowconfigure(5, weight=1)
 
     def set_planner_button(enabled: bool) -> None:
         run_planner_btn.state(["!disabled"] if enabled else ["disabled"])
