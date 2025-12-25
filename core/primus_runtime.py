@@ -599,8 +599,9 @@ class PrimusRuntime:
     Lightweight runtime wrapper around PrimusCore and security-related helpers.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, mode: str = "normal") -> None:
         self.system_root: Path = SYSTEM_ROOT
+        self.mode = mode
         self._core: Optional[PrimusCore] = None  # type: ignore[type-arg]
 
         # Optional helpers
@@ -609,7 +610,16 @@ class PrimusRuntime:
         self.captains_log_manager = (
             get_captains_log_manager() if get_captains_log_manager else None
         )
-        self.subchat_manager = get_subchat_manager(self.system_root) if get_subchat_manager else None
+        if SubchatManager is not None:
+            try:
+                self.subchat_manager = SubchatManager(self.system_root)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("SubchatManager initialization failed: %s", exc)
+                self.subchat_manager = None
+        elif get_subchat_manager is not None:
+            self.subchat_manager = get_subchat_manager(self.system_root)
+        else:
+            self.subchat_manager = None
         self.security_gate = get_security_gate() if get_security_gate else None
 
         logger.info("PrimusRuntime initialized.")

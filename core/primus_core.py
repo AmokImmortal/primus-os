@@ -452,8 +452,11 @@ class PrimusCore:
     # SubChat                                                            #
     # ------------------------------------------------------------------ #
 
+    def _get_subchat_manager(self):
+        return getattr(self, "subchat_manager", None)
+
     def get_subchat_status(self) -> Dict[str, Any]:
-        manager = getattr(self, "subchat_manager", None)
+        manager = self._get_subchat_manager()
         if manager is None:
             return {"status": "missing"}
         try:
@@ -461,6 +464,42 @@ class PrimusCore:
         except Exception as exc:  # noqa: BLE001
             logger.warning("Subchat status check failed: %s", exc)
             return {"status": "error"}
+
+    def list_subchats(self) -> List[Dict[str, Any]]:
+        manager = self._get_subchat_manager()
+        if manager is None:
+            return []
+
+        list_fn = getattr(manager, "list_subchats", None)
+        if callable(list_fn):
+            try:
+                return list_fn()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Subchat listing failed: %s", exc)
+                return []
+        return []
+
+    def run_subchat(self, subchat_id: str, user_message: str, session_id: Optional[str] = None) -> str:
+        manager = self._get_subchat_manager()
+        if manager is None:
+            return "SubChat system is not available."
+
+        run_fn = getattr(manager, "run_subchat", None)
+        if callable(run_fn):
+            try:
+                return run_fn(subchat_id=subchat_id, prompt=user_message, session_id=session_id)
+            except TypeError:
+                # Fallback for managers expecting positional args only.
+                return run_fn(subchat_id, user_message)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Subchat run failed for %s: %s", subchat_id, exc)
+                return f"Subchat '{subchat_id}' failed: {exc}"
+
+        # If the manager lacks a run API, offer a minimal placeholder.
+        known = {item.get("id") for item in self.list_subchats()}
+        if known and subchat_id not in known:
+            return f"Subchat '{subchat_id}' not found."
+        return f"[Subchat:{subchat_id}] {user_message}"
 
     # ------------------------------------------------------------------ #
     # Core self-test (used by PrimusRuntime.run_bootup_test)            #
