@@ -635,6 +635,16 @@ class PrimusRuntime:
                 setattr(core, "subchat_manager", self.subchat_manager)
             self._core = core
             logger.info("PrimusCore instance created and initialized.")
+        else:
+            # Ensure optional managers are attached even on reuse
+            if self.captains_log_manager is not None and not getattr(
+                self._core, "captains_log_manager", None
+            ):
+                setattr(self._core, "captains_log_manager", self.captains_log_manager)
+            if self.subchat_manager is not None and not getattr(
+                self._core, "subchat_manager", None
+            ):
+                setattr(self._core, "subchat_manager", self.subchat_manager)
 
         return self._core
 
