@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from core.agent_manager import AgentManager
 from core.model_manager import ModelManager
@@ -50,6 +50,7 @@ class PrimusCore:
 
         self.initialized = False
         self.captains_log_manager = None
+        self.subchat_manager = None
 
     # ------------------------------------------------------------------ #
     # Lifecycle                                                          #
@@ -446,6 +447,20 @@ class PrimusCore:
             logger.warning("Captain's Log clear blocked (inactive): %s", exc)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Captain's Log clear failed: %s", exc)
+
+    # ------------------------------------------------------------------ #
+    # SubChat                                                            #
+    # ------------------------------------------------------------------ #
+
+    def get_subchat_status(self) -> Dict[str, Any]:
+        manager = getattr(self, "subchat_manager", None)
+        if manager is None:
+            return {"status": "missing"}
+        try:
+            return manager.status()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Subchat status check failed: %s", exc)
+            return {"status": "error"}
 
     # ------------------------------------------------------------------ #
     # Core self-test (used by PrimusRuntime.run_bootup_test)            #

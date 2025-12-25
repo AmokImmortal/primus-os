@@ -1,127 +1,60 @@
-# /core/subchat_manager.py
-# Manages creation, isolation, permissions, security, and state of all sub-chats.
+from __future__ import annotations
 
-import uuid
-from datetime import datetime
+import logging
+from pathlib import Path
+from typing import Dict, List
 
-from core.subchat_isolation import SubchatIsolationRules
-from core.agent_permissions import AgentPermissions
-from core.agent_interaction_logger import AgentInteractionLogger
-from core.security_enforcer import SecurityEnforcer
+logger = logging.getLogger(__name__)
+
 
 class SubchatManager:
     """
-    Creates, tracks, isolates, secures, and manages sub-chat instances.
-    Acts as the authoritative controller for all branching conversations.
+    Minimal placeholder manager for future SubChat support.
+
+    Currently performs light discovery of a subchats directory (if present)
+    and exposes status/list helpers for diagnostics.
     """
 
-    def __init__(self):
-        self.subchats = {}  # subchat_id -> metadata + rules + permissions
-        self.logger = AgentInteractionLogger()
-        self.security = SecurityEnforcer()
+    def __init__(self, system_root: str | Path) -> None:
+        self.system_root = Path(system_root)
+        self.subchat_root = self.system_root / "subchats"
 
-    def create_subchat(self, parent_agent: str, purpose: str, permissions: dict = None):
+    def _discover_subchats(self) -> List[Dict[str, str]]:
         """
-        Create a new subchat with isolation rules and permissions.
+        Best-effort discovery of subchat descriptors.
+
+        For now, returns an empty list if the directory is missing or unreadable.
         """
-        subchat_id = str(uuid.uuid4())
+        if not self.subchat_root.exists():
+            return []
 
-        isolation = SubchatIsolationRules(
-            access_parent_memory=False,
-            allow_parent_logs=False,
-            parent_context_limit=50
-        )
+        subchats: List[Dict[str, str]] = []
+        try:
+            for path in sorted(self.subchat_root.iterdir()):
+                if path.is_dir():
+                    subchats.append({"id": path.name, "path": str(path)})
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Subchat discovery failed: %s", exc)
+            return []
+        return subchats
 
-        perms = AgentPermissions(permissions if permissions else {})
-
-        metadata = {
-            "id": subchat_id,
-            "parent_agent": parent_agent,
-            "purpose": purpose,
-            "created_at": datetime.utcnow().isoformat(),
-            "isolation": isolation,
-            "permissions": perms,
-            "messages": []
+    def status(self) -> Dict[str, object]:
+        """
+        Lightweight status block used by bootup diagnostics.
+        """
+        subchats = self._discover_subchats()
+        return {
+            "status": "ok",
+            "configured": bool(subchats),
+            "count": len(subchats),
         }
 
-        self.subchats[subchat_id] = metadata
-
-        self.logger.log_event(
-            agent=parent_agent,
-            action="SUBCHAT_CREATED",
-            details={"subchat_id": subchat_id, "purpose": purpose}
-        )
-
-        return subchat_id
-
-    def add_message(self, subchat_id: str, sender: str, message: str):
+    def list_subchats(self) -> List[Dict[str, str]]:
         """
-        Add a message to the subchat while enforcing all isolation + security rules.
+        Return discovered subchats (currently empty unless directories exist).
         """
+        return self._discover_subchats()
 
-        if subchat_id not in self.subchats:
-            raise ValueError(f"Subchat {subchat_id} does not exist.")
 
-        subchat = self.subchats[subchat_id]
-
-        # Security gate
-        if not self.security.allow_message(sender, message, subchat["permissions"]):
-            raise PermissionError("Message blocked by security layer.")
-
-        # Isolation enforcement
-        sanitized_message = subchat["isolation"].apply_isolation(message)
-
-        subchat["messages"].append({
-            "timestamp": datetime.utcnow().isoformat(),
-            "sender": sender,
-            "content": sanitized_message
-        })
-
-        self.logger.log_message(
-            agent=sender,
-            subchat_id=subchat_id,
-            message=sanitized_message
-        )
-
-        return True
-
-    def get_messages(self, subchat_id: str):
-        """
-        Retrieve message history for UI or internal use.
-        """
-        if subchat_id not in self.subchats:
-            raise ValueError(f"Subchat {subchat_id} does not exist.")
-
-        return self.subchats[subchat_id]["messages"]
-
-    def close_subchat(self, subchat_id: str):
-        """
-        Close and archive the subchat.
-        """
-        if subchat_id not in self.subchats:
-            raise ValueError(f"Subchat {subchat_id} does not exist.")
-
-        subchat = self.subchats[subchat_id]
-
-        self.logger.log_event(
-            agent=subchat["parent_agent"],
-            action="SUBCHAT_CLOSED",
-            details={"subchat_id": subchat_id}
-        )
-
-        del self.subchats[subchat_id]
-        return True
-
-    def list_subchats(self):
-        """
-        Return a summary listing of all active subchats.
-        """
-        return [
-            {
-                "id": sc["id"],
-                "parent_agent": sc["parent_agent"],
-                "purpose": sc["purpose"],
-                "created_at": sc["created_at"],
-            }
-            for sc in self.subchats.values()
-        ]
+def get_subchat_manager(system_root: str | Path) -> SubchatManager:
+    return SubchatManager(system_root)
