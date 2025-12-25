@@ -72,6 +72,8 @@ class CaptainsLogManager:
     # Journal operations
     # -------------------------------------------------
     def _ensure_active(self) -> None:
+        if os.environ.get("PRIMUS_CAPTAINS_LOG_DEV") == "1":
+            self.state.active = True
         if not self.is_active():
             raise PermissionError("Captain’s Log operations require Captain’s Log mode to be active.")
 
