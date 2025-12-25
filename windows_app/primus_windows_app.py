@@ -51,6 +51,27 @@ def main() -> None:
     root = Tk()
     root.title("PRIMUS OS – Control Center")
 
+        # --- Global Tk callback error handler: log to file + popup ---
+    import traceback
+
+    def tk_exception_handler(exc_type, exc_value, exc_tb):
+        log_path = PROJECT_ROOT / "tk_errors.log"
+        try:
+            with open(log_path, "w", encoding="utf-8") as f:
+                traceback.print_exception(exc_type, exc_value, exc_tb, file=f)
+        except Exception:
+            # Last-resort: don’t crash if logging fails
+            pass
+
+        # Short message in a popup so you know something went wrong
+        messagebox.showerror(
+            "Tk error",
+            f"{exc_type.__name__}: {exc_value}\n\nSee tk_errors.log for full details.",
+        )
+
+    # Tell Tkinter to use our handler for ALL callback exceptions
+    root.report_callback_exception = tk_exception_handler
+
     notebook = ttk.Notebook(root)
     notebook.pack(fill="both", expand=True)
 
