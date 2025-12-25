@@ -92,7 +92,6 @@ class PrimusCore:
             return []
 
         try:
-            # Adjust this call if your SessionManager uses a different name
             history = sm.load_session(session_id)
         except Exception as exc:  # noqa: BLE001
             logger.warning("load_history failed for %r: %s", session_id, exc)
@@ -110,7 +109,6 @@ class PrimusCore:
 
         msg = {"role": role, "content": content}
         try:
-            # Adjust this call if your SessionManager uses a different name
             sm.append_message(session_id, msg)
         except Exception as exc:  # noqa: BLE001
             logger.warning("append_message failed for %r: %s", session_id, exc)
@@ -236,7 +234,7 @@ class PrimusCore:
             return []
 
         if limit is not None and limit > 0:
-            return history[-limit:]
+            history = history[-limit:]
         return history
 
     def clear_session(self, session_id: str) -> None:
@@ -305,6 +303,9 @@ class PrimusCore:
         # 1) Load existing history
         history = self._load_history(session_id)
 
+        # Persist user message immediately so it's part of the session record
+        self._append_message(session_id, "user", user_message)
+
         # 2) Optional RAG context
         rag_context = ""
         if use_rag and rag_index:
@@ -355,7 +356,6 @@ class PrimusCore:
         reply = self.model_manager.generate(prompt, max_tokens=max_tokens)
 
         # Persist updated history
-        self._append_message(session_id, "user", user_message)
         self._append_message(session_id, "assistant", reply)
 
         return reply
