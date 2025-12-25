@@ -581,6 +581,13 @@ except Exception:
     get_security_gate = None
     logger.info("core.security_gate not available; external network gate checks disabled.")
 
+try:
+    from core.subchat_manager import SubchatManager, get_subchat_manager
+except Exception:
+    SubchatManager = None
+    get_subchat_manager = None
+    logger.info("core.subchat_manager not available; SubChat manager disabled.")
+
 
 # ---------------------------------------------------------------------------
 # PrimusRuntime
@@ -602,6 +609,7 @@ class PrimusRuntime:
         self.captains_log_manager = (
             get_captains_log_manager() if get_captains_log_manager else None
         )
+        self.subchat_manager = get_subchat_manager(self.system_root) if get_subchat_manager else None
         self.security_gate = get_security_gate() if get_security_gate else None
 
         logger.info("PrimusRuntime initialized.")
@@ -623,6 +631,8 @@ class PrimusRuntime:
             core.initialize()
             if self.captains_log_manager is not None:
                 setattr(core, "captains_log_manager", self.captains_log_manager)
+            if self.subchat_manager is not None:
+                setattr(core, "subchat_manager", self.subchat_manager)
             self._core = core
             logger.info("PrimusCore instance created and initialized.")
 
@@ -779,16 +789,16 @@ class PrimusRuntime:
 
             # --- Subchat subsystem --------------------------------------------
             try:
-                subchat_loader = getattr(core, "subchat_loader", None)
-                if subchat_loader is not None:
-                    subchats = core.list_subchats() if hasattr(core, "list_subchats") else []
-                    print(f"SubChat system : WORKING ({len(subchats)} subchats discovered)")
-                    logger.info("Bootup Test - Subchats OK (%d subchats).", len(subchats))
+                if self.subchat_manager is None:
+                    print("SubChat system : MISSING (manager not configured)")
+                    logger.warning("Bootup Test - Subchat manager missing.")
                 else:
-                    print("SubChat system : MISSING (loader not configured)")
-                    logger.warning("Bootup Test - Subchats loader missing.")
+                    status = self.subchat_manager.status()
+                    count = status.get("count", 0)
+                    print(f"SubChat system : WORKING ({count} subchats configured)")
+                    logger.info("Bootup Test - Subchats status: %s", json.dumps(status))
             except Exception as exc:  # noqa: BLE001
-                print(f"SubChat system : FAILED ({exc})")
+                print(f"SubChat system : ERROR (see logs)")
                 logger.exception("Bootup Test - Subchats check failed: %s", exc)
                 all_ok = False
 
