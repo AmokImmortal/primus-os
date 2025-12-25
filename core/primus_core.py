@@ -49,6 +49,7 @@ class PrimusCore:
         self.rag_retriever = RAGRetriever(self.rag_index_root)
 
         self.initialized = False
+        self.captains_log_manager = None
 
     # ------------------------------------------------------------------ #
     # Lifecycle                                                          #
@@ -376,6 +377,56 @@ class PrimusCore:
             rag_index="docs",
             max_tokens=256,
         )
+
+    # ------------------------------------------------------------------ #
+    # Captain's Log                                                      #
+    # ------------------------------------------------------------------ #
+
+    def _get_cl_manager(self):
+        return getattr(self, "captains_log_manager", None)
+
+    def captains_log_write(self, text: str) -> Dict[str, Any]:
+        manager = self._get_cl_manager()
+        if manager is None:
+            logger.warning("Captain's Log manager unavailable; write skipped.")
+            return {}
+        try:
+            return manager.add_journal_entry(text)
+        except PermissionError as exc:  # noqa: BLE001
+            logger.warning("Captain's Log write blocked (inactive): %s", exc)
+            return {}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Captain's Log write failed: %s", exc)
+            return {}
+
+    def captains_log_read(self, limit: int = 50) -> List[Dict[str, Any]]:
+        manager = self._get_cl_manager()
+        if manager is None:
+            logger.warning("Captain's Log manager unavailable; read skipped.")
+            return []
+        try:
+            entries = manager.list_journal_entries()
+            if limit is not None and limit > 0:
+                entries = entries[-limit:]
+            return entries
+        except PermissionError as exc:  # noqa: BLE001
+            logger.warning("Captain's Log read blocked (inactive): %s", exc)
+            return []
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Captain's Log read failed: %s", exc)
+            return []
+
+    def captains_log_clear(self) -> None:
+        manager = self._get_cl_manager()
+        if manager is None:
+            logger.warning("Captain's Log manager unavailable; clear skipped.")
+            return
+        try:
+            manager.clear_journal()
+        except PermissionError as exc:  # noqa: BLE001
+            logger.warning("Captain's Log clear blocked (inactive): %s", exc)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Captain's Log clear failed: %s", exc)
 
     # ------------------------------------------------------------------ #
     # Core self-test (used by PrimusRuntime.run_bootup_test)            #

@@ -621,6 +621,8 @@ class PrimusRuntime:
             logger.info("Creating PrimusCore instance from PrimusRuntime...")
             core = PrimusCore(system_root=self.system_root)
             core.initialize()
+            if self.captains_log_manager is not None:
+                setattr(core, "captains_log_manager", self.captains_log_manager)
             self._core = core
             logger.info("PrimusCore instance created and initialized.")
 
