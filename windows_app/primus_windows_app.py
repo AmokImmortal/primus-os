@@ -4,7 +4,7 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
-from tkinter import BooleanVar, END, DISABLED, NORMAL, Tk, ttk, messagebox
+from tkinter import BooleanVar, END, DISABLED, NORMAL, Tk, ttk, messagebox, Text
 from tkinter.scrolledtext import ScrolledText
 
 
@@ -34,8 +34,7 @@ def build_command(message: str, session_id: str, use_rag: bool, rag_index: str) 
     return cmd
 
 
-def run_chat_command(message: str, session_id: str, use_rag: bool, rag_index: str) -> tuple[bool, str, str]:
-    cmd = build_command(message, session_id, use_rag, rag_index)
+def run_cli_command(cmd: list[str]) -> tuple[bool, str, str]:
     proc = subprocess.run(
         cmd,
         cwd=PROJECT_ROOT,
@@ -50,38 +49,42 @@ def run_chat_command(message: str, session_id: str, use_rag: bool, rag_index: st
 
 def main() -> None:
     root = Tk()
-    root.title("PRIMUS OS – Chat (v0.1)")
+    root.title("PRIMUS OS – Control Center")
 
-    content = ttk.Frame(root, padding=10)
-    content.grid(row=0, column=0, sticky="nsew")
-    root.rowconfigure(0, weight=1)
-    root.columnconfigure(0, weight=1)
+    notebook = ttk.Notebook(root)
+    notebook.pack(fill="both", expand=True)
 
-    transcript = ScrolledText(content, wrap="word", height=20, width=80, state=DISABLED)
-    transcript.grid(row=0, column=0, columnspan=4, sticky="nsew", pady=(0, 8))
-    content.rowconfigure(0, weight=1)
+    # ------------------- Chat Tab ------------------- #
+    chat_frame = ttk.Frame(notebook, padding=10)
+    notebook.add(chat_frame, text="Chat")
+
+    chat_frame.rowconfigure(0, weight=1)
     for col in range(4):
-        content.columnconfigure(col, weight=1 if col < 3 else 0)
+        chat_frame.columnconfigure(col, weight=1 if col < 3 else 0)
+    chat_frame.columnconfigure(4, weight=0)
 
-    ttk.Label(content, text="Session ID:").grid(row=1, column=0, sticky="w")
-    session_var = ttk.Entry(content)
+    transcript = ScrolledText(chat_frame, wrap="word", height=20, width=80, state=DISABLED)
+    transcript.grid(row=0, column=0, columnspan=5, sticky="nsew", pady=(0, 8))
+
+    ttk.Label(chat_frame, text="Session ID:").grid(row=1, column=0, sticky="w")
+    session_var = ttk.Entry(chat_frame)
     session_var.insert(0, "cli")
     session_var.grid(row=1, column=1, sticky="we", padx=(4, 8))
 
     use_rag_var = BooleanVar(value=False)
-    rag_check = ttk.Checkbutton(content, text="Use RAG", variable=use_rag_var)
+    rag_check = ttk.Checkbutton(chat_frame, text="Use RAG", variable=use_rag_var)
     rag_check.grid(row=1, column=2, sticky="w")
 
-    ttk.Label(content, text="RAG index:").grid(row=1, column=3, sticky="e")
-    rag_index_var = ttk.Entry(content, width=12)
+    ttk.Label(chat_frame, text="RAG index:").grid(row=1, column=3, sticky="e")
+    rag_index_var = ttk.Entry(chat_frame, width=12)
     rag_index_var.insert(0, "docs")
     rag_index_var.grid(row=1, column=4, sticky="we", padx=(4, 0))
 
-    ttk.Label(content, text="Message:").grid(row=2, column=0, sticky="w", pady=(8, 0))
-    message_entry = ttk.Entry(content)
+    ttk.Label(chat_frame, text="Message:").grid(row=2, column=0, sticky="w", pady=(8, 0))
+    message_entry = ttk.Entry(chat_frame)
     message_entry.grid(row=2, column=1, columnspan=3, sticky="we", pady=(8, 0))
 
-    buttons_frame = ttk.Frame(content)
+    buttons_frame = ttk.Frame(chat_frame)
     buttons_frame.grid(row=2, column=4, sticky="e", padx=(8, 0), pady=(8, 0))
 
     send_btn = ttk.Button(buttons_frame, text="Send")
@@ -118,7 +121,8 @@ def main() -> None:
         set_send_enabled(False)
 
         def worker() -> None:
-            success, stdout, stderr = run_chat_command(user_text, session_id, use_rag, rag_index)
+            cmd = build_command(user_text, session_id, use_rag, rag_index)
+            success, stdout, stderr = run_cli_command(cmd)
             root.after(0, handle_result, success, stdout, stderr, user_text)
 
         threading.Thread(target=worker, daemon=True).start()
@@ -132,6 +136,104 @@ def main() -> None:
     clear_btn.configure(command=clear_transcript)
     message_entry.bind("<Return>", lambda event: do_send())
 
+    # ------------------- Captain's Log Tab ------------------- #
+    log_frame = ttk.Frame(notebook, padding=10)
+    notebook.add(log_frame, text="Captain's Log")
+
+    log_frame.rowconfigure(0, weight=1)
+    log_frame.columnconfigure(0, weight=1)
+    log_frame.columnconfigure(1, weight=0)
+
+    log_view = ScrolledText(log_frame, wrap="word", height=15, width=80, state=DISABLED)
+    log_view.grid(row=0, column=0, columnspan=2, sticky="nsew", pady=(0, 8))
+
+    ttk.Label(log_frame, text="New entry:").grid(row=1, column=0, sticky="w")
+    entry_text = Text(log_frame, height=4, width=60)
+    entry_text.grid(row=2, column=0, sticky="nsew", pady=(4, 4))
+    log_frame.rowconfigure(2, weight=0)
+
+    buttons_log = ttk.Frame(log_frame)
+    buttons_log.grid(row=2, column=1, sticky="ne", padx=(8, 0))
+
+    write_btn = ttk.Button(buttons_log, text="Write entry")
+    refresh_btn = ttk.Button(buttons_log, text="Refresh")
+    clear_log_btn = ttk.Button(buttons_log, text="Clear log")
+    write_btn.grid(row=0, column=0, pady=(0, 4), sticky="ew")
+    refresh_btn.grid(row=1, column=0, pady=(0, 4), sticky="ew")
+    clear_log_btn.grid(row=2, column=0, sticky="ew")
+
+    status_label = ttk.Label(log_frame, text="", foreground="gray")
+    status_label.grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
+
+    def set_log_buttons(enabled: bool) -> None:
+        state = ["!disabled"] if enabled else ["disabled"]
+        for btn in (write_btn, refresh_btn, clear_log_btn):
+            btn.state(state)
+
+    def update_log_view(content: str) -> None:
+        log_view.configure(state=NORMAL)
+        log_view.delete(1.0, END)
+        log_view.insert(END, content + ("\n" if content else ""))
+        log_view.configure(state=DISABLED)
+        log_view.see(END)
+
+    def handle_log_result(success: bool, stdout: str, stderr: str, status: str) -> None:
+        set_log_buttons(True)
+        if success:
+            update_log_view(stdout)
+            status_label.configure(text=status or "Operation completed.", foreground="green")
+        else:
+            err = stderr or stdout or "Unknown error"
+            status_label.configure(text=err, foreground="red")
+
+    def refresh_log() -> None:
+        set_log_buttons(False)
+
+        def worker() -> None:
+            cmd = [sys.executable, "primus_cli.py", "cl", "read"]
+            success, stdout, stderr = run_cli_command(cmd)
+            root.after(0, handle_log_result, success, stdout, stderr, "Log refreshed.")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def write_log_entry() -> None:
+        text = entry_text.get("1.0", END).strip()
+        if not text:
+            status_label.configure(text="Please enter text to write.", foreground="red")
+            return
+
+        set_log_buttons(False)
+
+        def worker() -> None:
+            cmd = [sys.executable, "primus_cli.py", "cl", "write", text]
+            success, stdout, stderr = run_cli_command(cmd)
+            root.after(0, handle_log_result, success, stdout, stderr, "Entry written.")
+            if success:
+                root.after(0, lambda: entry_text.delete("1.0", END))
+                root.after(0, refresh_log)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def clear_log() -> None:
+        if not messagebox.askyesno("Confirm", "Clear all Captain's Log entries?"):
+            return
+
+        set_log_buttons(False)
+
+        def worker() -> None:
+            cmd = [sys.executable, "primus_cli.py", "cl", "clear"]
+            success, stdout, stderr = run_cli_command(cmd)
+            root.after(0, handle_log_result, success, stdout, stderr, "Log cleared.")
+            if success:
+                root.after(0, refresh_log)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    write_btn.configure(command=write_log_entry)
+    refresh_btn.configure(command=refresh_log)
+    clear_log_btn.configure(command=clear_log)
+
+    refresh_log()
     root.mainloop()
 
 

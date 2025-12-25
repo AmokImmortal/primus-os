@@ -104,12 +104,23 @@ def cli_captains_log(args: argparse.Namespace) -> None:
     """
     runtime = PrimusRuntime()
     core = runtime._ensure_core()  # type: ignore[attr-defined]
+    manager = getattr(runtime, "captains_log_manager", None)
+    manager_active = False
+    if manager and hasattr(manager, "is_active"):
+        try:
+            manager_active = bool(manager.is_active())
+        except Exception:  # noqa: BLE001
+            manager_active = False
 
     has_api = all(
         hasattr(core, attr) for attr in ("captains_log_write", "captains_log_read", "captains_log_clear")
     )
     if not has_api:
         print("Captain's Log is not available in this mode.")
+        return
+
+    if not manager:
+        print("Captain's Log is disabled. Enable it in your security/captains_log settings or via PRIMUS_CAPTAINS_LOG_DEV=1.")
         return
 
     try:
@@ -123,11 +134,14 @@ def cli_captains_log(args: argparse.Namespace) -> None:
                 ts = entry.get("ts") or entry.get("timestamp", "")
                 print(f"[OK] Captain's Log entry recorded (id={entry_id}, ts={ts})")
             else:
-                print("Captain's Log is disabled. Enable it in your security/captains_log settings or dev override.")
+                print("Captain's Log is disabled. Enable it in your security/captains_log settings or via PRIMUS_CAPTAINS_LOG_DEV=1.")
         elif args.action == "read":
             entries = core.captains_log_read(limit=args.limit)
             if not entries:
-                print("No Captain's Log entries found (or Captain's Log is disabled).")
+                if not manager_active:
+                    print("Captain's Log is disabled. Enable it in your security/captains_log settings or via PRIMUS_CAPTAINS_LOG_DEV=1.")
+                else:
+                    print("No Captain's Log entries found.")
                 return
             print(f"Captain's Log entries (showing up to {len(entries)}):")
             for idx, entry in enumerate(entries, 1):
