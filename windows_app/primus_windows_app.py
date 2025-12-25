@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import threading
+import traceback
 from pathlib import Path
 from tkinter import BooleanVar, END, DISABLED, NORMAL, Tk, ttk, messagebox, Text
 from tkinter.scrolledtext import ScrolledText
@@ -26,6 +27,21 @@ def _thread_excepthook(args: threading.ExceptHookArgs) -> None:
         pass
 
 threading.excepthook = _thread_excepthook
+
+def log_thread_exception(context: str) -> None:
+    """
+    Log exceptions from background threads (planner, log write, etc.)
+    into tk_errors.log so we can debug crashes that don't hit Tk's
+    own callback error handler.
+    """
+    log_path = PROJECT_ROOT / "tk_errors.log"
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"\n=== {context} ===\n")
+            traceback.print_exc(file=f)
+    except Exception:
+        # Never let logging itself kill the app
+        pass
 
 def append_chat_line(widget: ScrolledText, line: str) -> None:
     widget.configure(state=NORMAL)
