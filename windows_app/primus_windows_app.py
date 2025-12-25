@@ -233,6 +233,75 @@ def main() -> None:
     refresh_btn.configure(command=refresh_log)
     clear_log_btn.configure(command=clear_log)
 
+    # ------------------- Planner Tab ------------------- #
+    planner_frame = ttk.Frame(notebook, padding=10)
+    notebook.add(planner_frame, text="Planner")
+
+    for col in range(2):
+        planner_frame.columnconfigure(col, weight=1)
+    planner_frame.rowconfigure(1, weight=1)
+    planner_frame.rowconfigure(3, weight=1)
+
+    ttk.Label(planner_frame, text="Planner prompt:").grid(row=0, column=0, columnspan=2, sticky="w")
+    planner_prompt = Text(planner_frame, height=4, width=80)
+    planner_prompt.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(4, 8))
+
+    run_planner_btn = ttk.Button(planner_frame, text="Run planner")
+    run_planner_btn.grid(row=2, column=0, sticky="w")
+
+    planner_status = ttk.Label(planner_frame, text="", foreground="gray")
+    planner_status.grid(row=2, column=1, sticky="e")
+
+    ttk.Label(planner_frame, text="Planner result:").grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
+    planner_output = ScrolledText(planner_frame, wrap="word", height=12, state=DISABLED)
+    planner_output.grid(row=4, column=0, columnspan=2, sticky="nsew", pady=(4, 0))
+    planner_frame.rowconfigure(4, weight=1)
+
+    def set_planner_button(enabled: bool) -> None:
+        run_planner_btn.state(["!disabled"] if enabled else ["disabled"])
+
+    def update_planner_output(text: str) -> None:
+        planner_output.configure(state=NORMAL)
+        planner_output.delete(1.0, END)
+        planner_output.insert(END, text + ("\n" if text else ""))
+        planner_output.configure(state=DISABLED)
+        planner_output.see(END)
+
+    def handle_planner_result(success: bool, stdout: str, stderr: str) -> None:
+        set_planner_button(True)
+        if success:
+            update_planner_output(stdout)
+            planner_status.configure(text="Planner finished.", foreground="green")
+        else:
+            err = stderr or stdout or "Planner: CLI error or SubChat not available; see console."
+            planner_status.configure(text=err, foreground="red")
+
+    def run_planner() -> None:
+        prompt_text = planner_prompt.get("1.0", END).strip()
+        if not prompt_text:
+            planner_status.configure(text="Enter a prompt for the planner.", foreground="red")
+            return
+
+        set_planner_button(False)
+        planner_status.configure(text="Running planner...", foreground="gray")
+
+        def worker() -> None:
+            cmd = [
+                sys.executable,
+                "primus_cli.py",
+                "subchat",
+                "run",
+                "--id",
+                "daily_planner",
+                prompt_text,
+            ]
+            success, stdout, stderr = run_cli_command(cmd)
+            root.after(0, handle_planner_result, success, stdout, stderr)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    run_planner_btn.configure(command=run_planner)
+
     refresh_log()
     root.mainloop()
 
