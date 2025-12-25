@@ -286,22 +286,26 @@ def main() -> None:
             # Optionally save to Captain's Log if checkbox is enabled
             text_to_log = stdout.strip()
             if save_to_log_var.get() and text_to_log:
-                log_cmd = [
-                    sys.executable,
-                    "primus_cli.py",
-                    "cl",
-                    "write",
-                    text_to_log,
-                ]
+                def log_worker() -> None:
+                    cmd = [
+                        sys.executable,
+                        "primus_cli.py",
+                        "cl",
+                        "write",
+                        text_to_log,
+                    ]
+                    ok, _out, _err = run_cli_command(cmd)
 
-                def after_log_write(ok: bool, _out: str, _err: str) -> None:
-                    if not ok:
-                        planner_status.configure(
-                            text="Planner saved, but Captain's Log write failed; see console.",
-                            foreground="red",
-                        )
+                    def after_log_write() -> None:
+                        if not ok:
+                            planner_status.configure(
+                                text="Planner saved, but Captain's Log write failed; see console.",
+                                foreground="red",
+                            )
 
-                run_cli_command(log_cmd, after_log_write)
+                    root.after(0, after_log_write)
+
+                threading.Thread(target=log_worker, daemon=True).start()
         else:
             err = stderr or stdout or "Planner: CLI error or SubChat not available; see console."
             planner_status.configure(text=err, foreground="red")
