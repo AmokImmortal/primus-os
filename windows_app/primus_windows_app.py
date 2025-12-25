@@ -10,6 +10,22 @@ from tkinter.scrolledtext import ScrolledText
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+import traceback
+
+def _thread_excepthook(args: threading.ExceptHookArgs) -> None:
+    log_path = PROJECT_ROOT / "tk_errors.log"
+    try:
+        with open(log_path, "w", encoding="utf-8") as f:
+            traceback.print_exception(
+                args.exc_type,
+                args.exc_value,
+                args.exc_traceback,
+                file=f,
+            )
+    except Exception:
+        pass
+
+threading.excepthook = _thread_excepthook
 
 def append_chat_line(widget: ScrolledText, line: str) -> None:
     widget.configure(state=NORMAL)
