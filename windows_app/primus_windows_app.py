@@ -11,6 +11,22 @@ from tkinter.scrolledtext import ScrolledText
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+import traceback
+
+def _thread_excepthook(args: threading.ExceptHookArgs) -> None:
+    log_path = PROJECT_ROOT / "tk_errors.log"
+    try:
+        with open(log_path, "w", encoding="utf-8") as f:
+            traceback.print_exception(
+                args.exc_type,
+                args.exc_value,
+                args.exc_traceback,
+                file=f,
+            )
+    except Exception:
+        pass
+
+threading.excepthook = _thread_excepthook
 
 def log_thread_exception(context: str) -> None:
     """
@@ -66,6 +82,27 @@ def run_cli_command(cmd: list[str]) -> tuple[bool, str, str]:
 def main() -> None:
     root = Tk()
     root.title("PRIMUS OS – Control Center")
+
+        # --- Global Tk callback error handler: log to file + popup ---
+    import traceback
+
+    def tk_exception_handler(exc_type, exc_value, exc_tb):
+        log_path = PROJECT_ROOT / "tk_errors.log"
+        try:
+            with open(log_path, "w", encoding="utf-8") as f:
+                traceback.print_exception(exc_type, exc_value, exc_tb, file=f)
+        except Exception:
+            # Last-resort: don’t crash if logging fails
+            pass
+
+        # Short message in a popup so you know something went wrong
+        messagebox.showerror(
+            "Tk error",
+            f"{exc_type.__name__}: {exc_value}\n\nSee tk_errors.log for full details.",
+        )
+
+    # Tell Tkinter to use our handler for ALL callback exceptions
+    root.report_callback_exception = tk_exception_handler
 
     notebook = ttk.Notebook(root)
     notebook.pack(fill="both", expand=True)
@@ -253,33 +290,34 @@ def main() -> None:
     planner_frame = ttk.Frame(notebook, padding=10)
     notebook.add(planner_frame, text="Planner")
 
-    for col in range(3):
+    for col in range(2):
         planner_frame.columnconfigure(col, weight=1)
     planner_frame.rowconfigure(1, weight=1)
-    planner_frame.rowconfigure(4, weight=1)
+    planner_frame.rowconfigure(3, weight=1)
 
     ttk.Label(planner_frame, text="Planner prompt:").grid(row=0, column=0, columnspan=2, sticky="w")
     planner_prompt = Text(planner_frame, height=4, width=80)
-    planner_prompt.grid(row=1, column=0, columnspan=3, sticky="nsew", pady=(4, 8))
+    planner_prompt.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(4, 8))
 
     run_planner_btn = ttk.Button(planner_frame, text="Run planner")
     run_planner_btn.grid(row=2, column=0, sticky="w")
 
-    save_plan_var = BooleanVar(value=True)
-    save_check = ttk.Checkbutton(
+    planner_status = ttk.Label(planner_frame, text="", foreground="gray")
+    planner_status.grid(row=2, column=1, sticky="e")
+
+    # Checkbox: save planner result to Captain's Log (UI only for now)
+    save_to_log_var = BooleanVar(value=True)
+    save_to_log_check = ttk.Checkbutton(
         planner_frame,
         text="Save planner result to Captain's Log",
-        variable=save_plan_var,
+        variable=save_to_log_var,
     )
-    save_check.grid(row=2, column=1, sticky="w", padx=(12, 0))
+    save_to_log_check.grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
 
-    planner_status = ttk.Label(planner_frame, text="", foreground="gray")
-    planner_status.grid(row=2, column=2, sticky="e")
-
-    ttk.Label(planner_frame, text="Planner result:").grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 0))
+    ttk.Label(planner_frame, text="Planner result:").grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
     planner_output = ScrolledText(planner_frame, wrap="word", height=12, state=DISABLED)
-    planner_output.grid(row=4, column=0, columnspan=3, sticky="nsew", pady=(4, 0))
-    planner_frame.rowconfigure(4, weight=1)
+    planner_output.grid(row=5, column=0, columnspan=2, sticky="nsew", pady=(4, 0))
+    planner_frame.rowconfigure(5, weight=1)
 
     def set_planner_button(enabled: bool) -> None:
         run_planner_btn.state(["!disabled"] if enabled else ["disabled"])
@@ -291,59 +329,39 @@ def main() -> None:
         planner_output.configure(state=DISABLED)
         planner_output.see(END)
 
-    def handle_planner_result(success: bool, stdout: str, stderr: str, save_requested: bool) -> None:
-        if not success:
-            set_planner_button(True)
-            err = stderr or stdout or "Planner: CLI error or SubChat not available; see console."
-            planner_status.configure(text=err, foreground="red")
-            return
+    def handle_planner_result(success: bool, stdout: str, stderr: str) -> None:
+        set_planner_button(True)
 
-        update_planner_output(stdout)
+        if success and not stderr:
+            update_planner_output(stdout)
+            planner_status.configure(text="Planner finished.", foreground="green")
 
-        if save_requested and stdout:
-            planner_status.configure(text="Saving to Captain's Log...", foreground="gray")
+            # Optionally save to Captain's Log if checkbox is enabled
+            text_to_log = stdout.strip()
+            if save_to_log_var.get() and text_to_log:
+                def log_worker() -> None:
+                    cmd = [
+                        sys.executable,
+                        "primus_cli.py",
+                        "cl",
+                        "write",
+                        text_to_log,
+                    ]
+                    ok, _out, _err = run_cli_command(cmd)
 
-            def save_worker() -> None:
-                try:
-                    entry_text = f"Daily plan\n\n{stdout[:1000]}"
-                    log_cmd = [sys.executable, "primus_cli.py", "cl", "write", entry_text]
-                    log_success, log_out, log_err = run_cli_command(log_cmd)
-
-                    def finish_save() -> None:
-                        set_planner_button(True)
-                        if log_success:
-                            planner_status.configure(
-                                text="Planner finished and saved to Captain's Log.", foreground="green"
-                            )
-                        else:
+                    def after_log_write() -> None:
+                        if not ok:
                             planner_status.configure(
                                 text="Planner saved, but Captain's Log write failed; see console.",
                                 foreground="red",
                             )
-                            if not stderr:
-                                planner_status.configure(
-                                    text=planner_status.cget("text") + " " + (log_err or log_out),
-                                    foreground="red",
-                                )
 
-                    root.after(0, finish_save)
-                except Exception:
-                    log_thread_exception("planner_log_worker")
+                    root.after(0, after_log_write)
 
-                    def _fail() -> None:
-                        set_planner_button(True)
-                        planner_status.configure(
-                            text="Planner crashed while saving to Captain's Log; see tk_errors.log",
-                            foreground="red",
-                        )
-
-                    root.after(0, _fail)
-
-            threading.Thread(target=save_worker, daemon=True).start()
-            return
-
-        planner_status.configure(text="Planner finished.", foreground="green")
-        set_planner_button(True)
+                threading.Thread(target=log_worker, daemon=True).start()
+        else:
+            err = stderr or stdout or "Planner: CLI error or SubChat not available; see console."
+            planner_status.configure(text=err, foreground="red")
 
     def run_planner() -> None:
         prompt_text = planner_prompt.get("1.0", END).strip()
@@ -355,29 +373,17 @@ def main() -> None:
         planner_status.configure(text="Running planner...", foreground="gray")
 
         def worker() -> None:
-            try:
-                cmd = [
-                    sys.executable,
-                    "primus_cli.py",
-                    "subchat",
-                    "run",
-                    "--id",
-                    "daily_planner",
-                    prompt_text,
-                ]
-                success, stdout, stderr = run_cli_command(cmd)
-                root.after(0, handle_planner_result, success, stdout, stderr, save_plan_var.get())
-            except Exception:
-                log_thread_exception("planner_worker")
-
-                def _fail() -> None:
-                    set_planner_button(True)
-                    planner_status.configure(
-                        text="Planner crashed; see tk_errors.log",
-                        foreground="red",
-                    )
-
-                root.after(0, _fail)
+            cmd = [
+                sys.executable,
+                "primus_cli.py",
+                "subchat",
+                "run",
+                "--id",
+                "daily_planner",
+                prompt_text,
+            ]
+            success, stdout, stderr = run_cli_command(cmd)
+            root.after(0, handle_planner_result, success, stdout, stderr)
 
         threading.Thread(target=worker, daemon=True).start()
 
