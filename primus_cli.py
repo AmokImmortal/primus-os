@@ -12,6 +12,7 @@ Commands:
 """
 
 import argparse
+import json
 import logging
 from pathlib import Path
 
@@ -206,6 +207,62 @@ def cli_rag_search(args: argparse.Namespace) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# Command: subchat                                                           #
+# --------------------------------------------------------------------------- #
+
+
+def cli_subchat_list(args: argparse.Namespace) -> None:
+    runtime = PrimusRuntime()
+    core = runtime._ensure_core()  # type: ignore[attr-defined]
+
+    subchats = []
+    list_fn = getattr(core, "list_subchats", None)
+    manager = getattr(core, "subchat_manager", None)
+
+    if callable(list_fn):
+        subchats = list_fn()
+    elif manager and hasattr(manager, "list_subchats"):
+        try:
+            subchats = manager.list_subchats()
+        except Exception:  # noqa: BLE001
+            subchats = []
+
+    if not subchats:
+        print("No subchats configured.")
+        return
+
+    if getattr(args, "verbose", False):
+        for sc in subchats:
+            print(json.dumps(sc, indent=2))
+        return
+
+    print(f"{'ID':15} {'Name':20} Description")
+    print(f"{'-'*15} {'-'*20} {'-'*40}")
+    for sc in subchats:
+        sid = sc.get("id", "")
+        name = sc.get("name", "")
+        desc = sc.get("description", "")
+        print(f"{sid:15} {name:20} {desc}")
+
+
+def cli_subchat_run(args: argparse.Namespace) -> None:
+    runtime = PrimusRuntime()
+    core = runtime._ensure_core()  # type: ignore[attr-defined]
+
+    run_fn = getattr(core, "run_subchat", None)
+    if not callable(run_fn):
+        print("SubChat system is not available.")
+        return
+
+    reply = run_fn(
+        subchat_id=args.id,
+        user_message=args.message,
+        session_id=args.session,
+    )
+    print(reply)
+
+
+# --------------------------------------------------------------------------- #
 # Parser builder                                                              #
 # --------------------------------------------------------------------------- #
 
@@ -308,6 +365,39 @@ def build_parser() -> argparse.ArgumentParser:
         help="Number of top results to return (default: 3)",
     )
     p_search.set_defaults(func=cli_rag_search)
+
+    # subchat
+    p_subchat = subparsers.add_parser(
+        "subchat",
+        help="Manage and run SubChats (mini agents)",
+    )
+    subchat_sub = p_subchat.add_subparsers(dest="subcommand", required=True)
+
+    p_sc_list = subchat_sub.add_parser("list", help="List available subchats")
+    p_sc_list.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Print full subchat entries",
+    )
+    p_sc_list.set_defaults(func=cli_subchat_list)
+
+    p_sc_run = subchat_sub.add_parser("run", help="Run a subchat")
+    p_sc_run.add_argument(
+        "--id",
+        required=True,
+        dest="id",
+        help="Subchat ID to run",
+    )
+    p_sc_run.add_argument(
+        "message",
+        help="Message to send to the subchat",
+    )
+    p_sc_run.add_argument(
+        "--session",
+        default="subchat",
+        help="Session ID to use (default: subchat)",
+    )
+    p_sc_run.set_defaults(func=cli_subchat_run)
 
     # session-history
     p_hist = subparsers.add_parser(
