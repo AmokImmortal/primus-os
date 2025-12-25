@@ -278,9 +278,30 @@ def main() -> None:
 
     def handle_planner_result(success: bool, stdout: str, stderr: str) -> None:
         set_planner_button(True)
-        if success:
+
+        if success and not stderr:
             update_planner_output(stdout)
             planner_status.configure(text="Planner finished.", foreground="green")
+
+            # Optionally save to Captain's Log if checkbox is enabled
+            text_to_log = stdout.strip()
+            if save_to_log_var.get() and text_to_log:
+                log_cmd = [
+                    sys.executable,
+                    "primus_cli.py",
+                    "cl",
+                    "write",
+                    text_to_log,
+                ]
+
+                def after_log_write(ok: bool, _out: str, _err: str) -> None:
+                    if not ok:
+                        planner_status.configure(
+                            text="Planner saved, but Captain's Log write failed; see console.",
+                            foreground="red",
+                        )
+
+                run_cli_command(log_cmd, after_log_write)
         else:
             err = stderr or stdout or "Planner: CLI error or SubChat not available; see console."
             planner_status.configure(text=err, foreground="red")
