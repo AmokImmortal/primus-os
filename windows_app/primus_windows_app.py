@@ -237,32 +237,24 @@ def main() -> None:
     planner_frame = ttk.Frame(notebook, padding=10)
     notebook.add(planner_frame, text="Planner")
 
-    for col in range(3):
+    for col in range(2):
         planner_frame.columnconfigure(col, weight=1)
     planner_frame.rowconfigure(1, weight=1)
-    planner_frame.rowconfigure(4, weight=1)
+    planner_frame.rowconfigure(3, weight=1)
 
     ttk.Label(planner_frame, text="Planner prompt:").grid(row=0, column=0, columnspan=2, sticky="w")
     planner_prompt = Text(planner_frame, height=4, width=80)
-    planner_prompt.grid(row=1, column=0, columnspan=3, sticky="nsew", pady=(4, 8))
+    planner_prompt.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(4, 8))
 
     run_planner_btn = ttk.Button(planner_frame, text="Run planner")
     run_planner_btn.grid(row=2, column=0, sticky="w")
 
-    save_plan_var = BooleanVar(value=True)
-    save_check = ttk.Checkbutton(
-        planner_frame,
-        text="Save planner result to Captain's Log",
-        variable=save_plan_var,
-    )
-    save_check.grid(row=2, column=1, sticky="w", padx=(12, 0))
-
     planner_status = ttk.Label(planner_frame, text="", foreground="gray")
-    planner_status.grid(row=2, column=2, sticky="e")
+    planner_status.grid(row=2, column=1, sticky="e")
 
-    ttk.Label(planner_frame, text="Planner result:").grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 0))
+    ttk.Label(planner_frame, text="Planner result:").grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
     planner_output = ScrolledText(planner_frame, wrap="word", height=12, state=DISABLED)
-    planner_output.grid(row=4, column=0, columnspan=3, sticky="nsew", pady=(4, 0))
+    planner_output.grid(row=4, column=0, columnspan=2, sticky="nsew", pady=(4, 0))
     planner_frame.rowconfigure(4, weight=1)
 
     def set_planner_button(enabled: bool) -> None:
@@ -275,48 +267,14 @@ def main() -> None:
         planner_output.configure(state=DISABLED)
         planner_output.see(END)
 
-    def handle_planner_result(success: bool, stdout: str, stderr: str, save_requested: bool) -> None:
-        if not success:
-            set_planner_button(True)
+    def handle_planner_result(success: bool, stdout: str, stderr: str) -> None:
+        set_planner_button(True)
+        if success:
+            update_planner_output(stdout)
+            planner_status.configure(text="Planner finished.", foreground="green")
+        else:
             err = stderr or stdout or "Planner: CLI error or SubChat not available; see console."
             planner_status.configure(text=err, foreground="red")
-            return
-
-        update_planner_output(stdout)
-
-        if save_requested and stdout:
-            planner_status.configure(text="Saving to Captain's Log...", foreground="gray")
-
-            def save_worker() -> None:
-                entry_text = f"Daily plan\n\n{stdout[:1000]}"
-                log_cmd = [sys.executable, "primus_cli.py", "cl", "write", entry_text]
-                log_success, log_out, log_err = run_cli_command(log_cmd)
-
-                def finish_save() -> None:
-                    set_planner_button(True)
-                    if log_success:
-                        planner_status.configure(
-                            text="Planner finished and saved to Captain's Log.", foreground="green"
-                        )
-                    else:
-                        planner_status.configure(
-                            text="Planner finished, but Captain's Log save failed or is disabled.",
-                            foreground="red",
-                        )
-                        if not stderr:
-                            # surface the log error in the status if planner succeeded
-                            planner_status.configure(
-                                text=planner_status.cget("text") + " " + (log_err or log_out),
-                                foreground="red",
-                            )
-
-                root.after(0, finish_save)
-
-            threading.Thread(target=save_worker, daemon=True).start()
-            return
-
-        planner_status.configure(text="Planner finished.", foreground="green")
-        set_planner_button(True)
 
     def run_planner() -> None:
         prompt_text = planner_prompt.get("1.0", END).strip()
@@ -338,7 +296,7 @@ def main() -> None:
                 prompt_text,
             ]
             success, stdout, stderr = run_cli_command(cmd)
-            root.after(0, handle_planner_result, success, stdout, stderr, save_plan_var.get())
+            root.after(0, handle_planner_result, success, stdout, stderr)
 
         threading.Thread(target=worker, daemon=True).start()
 
