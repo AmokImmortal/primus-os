@@ -346,23 +346,22 @@ def main() -> None:
         planner_output.see(END)
 
     def handle_planner_result(success: bool, stdout: str, stderr: str) -> None:
-        """Handle completion of the planner CLI call."""
         set_planner_button(True)
 
-        if success:
-            # Show ONLY the planner's textual answer in the UI.
+        if success and not stderr:
             update_planner_output(stdout)
-            if stderr:
-                # Backend wrote logs to stderr (e.g. llama metadata) – not fatal.
-                planner_status.configure(
-                    text="Planner finished (backend wrote logs; see console).",
-                    foreground="orange",
-                )
-            else:
-                planner_status.configure(text="Planner finished.", foreground="green")
+            planner_status.configure(text="Planner finished.", foreground="green")
 
             # Optionally save to Captain's Log if checkbox is enabled
             text_to_log = stdout.strip()
+
+            # --- NEW: trim to a safe size so Windows command line doesn't explode ---
+            if text_to_log:
+                MAX_LOG_CHARS = 1500
+                if len(text_to_log) > MAX_LOG_CHARS:
+                    text_to_log = text_to_log[:MAX_LOG_CHARS] + "\n...[planner output truncated in log]"
+            # -----------------------------------------------------------------------
+
             if save_to_log_var.get() and text_to_log:
                 def log_worker() -> None:
                     cmd = [
@@ -372,12 +371,19 @@ def main() -> None:
                         "write",
                         text_to_log,
                     ]
-                    ok, _out, _err = run_cli_command(cmd)
+                    ok, log_out, log_err = run_cli_command(cmd)
 
                     def after_log_write() -> None:
-                        if not ok:
+                        if ok:
+                            # Optional: small confirmation
                             planner_status.configure(
-                                text="Planner saved, but Captain's Log write failed; see console.",
+                                text="Planner finished and saved to Captain's Log.",
+                                foreground="green",
+                            )
+                        else:
+                            err_msg = log_err or log_out or "Captain's Log write failed; see console."
+                            planner_status.configure(
+                                text=err_msg,
                                 foreground="red",
                             )
 
@@ -385,12 +391,8 @@ def main() -> None:
 
                 threading.Thread(target=log_worker, daemon=True).start()
         else:
-            # Real failure (non-zero exit code)
             err = stderr or stdout or "Planner: CLI error or SubChat not available; see console."
             planner_status.configure(text=err, foreground="red")
-            # Optionally also show the error text in the result box:
-            update_planner_output(err)
-
     def run_planner() -> None:
         prompt_text = planner_prompt.get("1.0", END).strip()
         if not prompt_text:
