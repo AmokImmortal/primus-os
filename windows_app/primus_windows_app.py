@@ -32,7 +32,6 @@ def build_planner_prompt(user_prompt: str) -> str:
     )
     return base
 
-
 def extract_planner_summary(raw: str) -> str:
     """Strip backend/log spam and keep only the actual plan text."""
     if not raw:
