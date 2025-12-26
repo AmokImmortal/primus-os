@@ -346,21 +346,40 @@ def main() -> None:
         planner_output.see(END)
 
     def handle_planner_result(success: bool, stdout: str, stderr: str) -> None:
+        """
+        Handle the result of the planner CLI call.
+
+        - If the subprocess exit code was 0 (success=True), we always treat it
+          as a success, even if there is stderr (the model loader is noisy).
+        - stderr is only surfaced in the status line as "logs available".
+        """
         set_planner_button(True)
 
-        if success and not stderr:
-            update_planner_output(stdout)
-            planner_status.configure(text="Planner finished.", foreground="green")
+        if success:
+            # Show whatever the planner printed (logs + answer)
+            update_planner_output(stdout or "[no planner output]")
+            if stderr:
+                planner_status.configure(
+                    text="Planner finished (debug logs in console).",
+                    foreground="green",
+                )
+            else:
+                planner_status.configure(
+                    text="Planner finished.",
+                    foreground="green",
+                )
 
-            # Optionally save to Captain's Log if checkbox is enabled
+            # --- Save to Captain's Log (optional) -------------------------
             text_to_log = stdout.strip()
 
-            # --- NEW: trim to a safe size so Windows command line doesn't explode ---
+            # Trim so Windows command line doesn't explode
             if text_to_log:
                 MAX_LOG_CHARS = 1500
                 if len(text_to_log) > MAX_LOG_CHARS:
-                    text_to_log = text_to_log[:MAX_LOG_CHARS] + "\n...[planner output truncated in log]"
-            # -----------------------------------------------------------------------
+                    text_to_log = (
+                        text_to_log[:MAX_LOG_CHARS]
+                        + "\n...[planner output truncated in log]"
+                    )
 
             if save_to_log_var.get() and text_to_log:
                 def log_worker() -> None:
@@ -375,7 +394,6 @@ def main() -> None:
 
                     def after_log_write() -> None:
                         if ok:
-                            # Optional: small confirmation
                             planner_status.configure(
                                 text="Planner finished and saved to Captain's Log.",
                                 foreground="green",
@@ -390,7 +408,9 @@ def main() -> None:
                     root.after(0, after_log_write)
 
                 threading.Thread(target=log_worker, daemon=True).start()
+            # --------------------------------------------------------------
         else:
+            # True failure: non-zero exit code
             err = stderr or stdout or "Planner: CLI error or SubChat not available; see console."
             planner_status.configure(text=err, foreground="red")
             
