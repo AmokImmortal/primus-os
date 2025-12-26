@@ -98,7 +98,7 @@ def extract_planner_summary(stdout: str, max_chars: int = 1000) -> str:
     """
     Take the tail of the planner output and strip off noisy loader lines.
 
-    The actual natural-language plan is usually at the end of stdout,
+    The actual natural-language plan is usually at the end of stdout/stderr,
     so we keep only the last max_chars and drop obvious llama loader lines.
     """
     if not stdout:
