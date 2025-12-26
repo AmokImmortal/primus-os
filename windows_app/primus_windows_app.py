@@ -370,9 +370,10 @@ def main() -> None:
                 )
 
             # --- Save to Captain's Log (optional) -------------------------
-            text_to_log = stdout.strip()
+            # Use a cleaned-up tail of the output so we don't log loader spam
+            text_to_log = extract_planner_summary(stdout)
 
-            # Trim so Windows command line doesn't explode
+            # Trim further so Windows command line doesn't explode
             if text_to_log:
                 MAX_LOG_CHARS = 1500
                 if len(text_to_log) > MAX_LOG_CHARS:
