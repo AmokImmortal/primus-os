@@ -346,11 +346,20 @@ def main() -> None:
         planner_output.see(END)
 
     def handle_planner_result(success: bool, stdout: str, stderr: str) -> None:
+        """Handle completion of the planner CLI call."""
         set_planner_button(True)
 
-        if success and not stderr:
+        if success:
+            # Show ONLY the planner's textual answer in the UI.
             update_planner_output(stdout)
-            planner_status.configure(text="Planner finished.", foreground="green")
+            if stderr:
+                # Backend wrote logs to stderr (e.g. llama metadata) – not fatal.
+                planner_status.configure(
+                    text="Planner finished (backend wrote logs; see console).",
+                    foreground="orange",
+                )
+            else:
+                planner_status.configure(text="Planner finished.", foreground="green")
 
             # Optionally save to Captain's Log if checkbox is enabled
             text_to_log = stdout.strip()
@@ -376,8 +385,11 @@ def main() -> None:
 
                 threading.Thread(target=log_worker, daemon=True).start()
         else:
+            # Real failure (non-zero exit code)
             err = stderr or stdout or "Planner: CLI error or SubChat not available; see console."
             planner_status.configure(text=err, foreground="red")
+            # Optionally also show the error text in the result box:
+            update_planner_output(err)
 
     def run_planner() -> None:
         prompt_text = planner_prompt.get("1.0", END).strip()
