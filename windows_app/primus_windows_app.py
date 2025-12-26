@@ -94,31 +94,50 @@ def run_cli_command(cmd: list[str]) -> tuple[bool, str, str]:
     stderr = (proc.stderr or "").strip()
     return proc.returncode == 0, stdout, stderr
 
-def extract_planner_summary(stdout: str, max_chars: int = 1000) -> str:
-    """
-    Take the tail of the planner output and strip off noisy loader lines.
+    def handle_planner_result(success: bool, stdout: str, stderr: str) -> None:
+        set_planner_button(True)
 
-    The actual natural-language plan is usually at the end of stdout/stderr,
-    so we keep only the last max_chars and drop obvious llama loader lines.
-    """
-    if not stdout:
-        return ""
+        # Combine stdout + stderr so we see whatever the subchat printed.
+        combined = stdout or ""
+        if stderr:
+            combined = (combined + "\n" + stderr).strip() if combined else stderr
 
-    tail = stdout[-max_chars:]
-    lines = []
-    for line in tail.splitlines():
-        if line.startswith("llama_model_loader:"):
-            continue
-        if "PrimusRuntime initialized." in line:
-            continue
-        if "Creating PrimusCore instance from PrimusRuntime" in line:
-            continue
-        if "[core.agent_manager]" in line:
-            continue
-        lines.append(line)
+        if success:
+            # Try to strip loader noise and keep just the actual plan.
+            summary = extract_planner_summary(combined)
+            if not summary:
+                summary = combined
 
-    summary = "\n".join(lines).strip()
-    return summary
+            update_planner_output(summary)
+            planner_status.configure(text="Planner finished.", foreground="green")
+
+            # Optionally save to Captain's Log
+            if save_to_log_var.get() and summary:
+                def log_worker() -> None:
+                    cmd = [
+                        sys.executable,
+                        "primus_cli.py",
+                        "cl",
+                        "write",
+                        summary,
+                    ]
+                    ok, _out, _err = run_cli_command(cmd)
+
+                    def after_log_write() -> None:
+                        if not ok:
+                            planner_status.configure(
+                                text="Planner finished, but Captain's Log write failed; see console.",
+                                foreground="red",
+                            )
+
+                    root.after(0, after_log_write)
+
+                threading.Thread(target=log_worker, daemon=True).start()
+        else:
+            # Error path: show whatever we have so you can debug
+            err = stderr or stdout or "Planner: CLI error or SubChat not available; see console."
+            planner_status.configure(text=err, foreground="red")
+            update_planner_output(err)
 
 def main() -> None:
     root = Tk()
