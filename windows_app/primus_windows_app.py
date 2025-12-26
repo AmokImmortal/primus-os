@@ -370,13 +370,80 @@ def main() -> None:
         def worker() -> None:
             cmd = [sys.executable, "primus_cli.py", "cl", "write", text]
             success, stdout, stderr = run_cli_command(cmd)
-            root.after(0, handle_log_result, success, stdout, stderr, "Entry written.")
-            if success:
-                root.after(0, lambda: entry_text.delete("1.0", END))
-                root.after(0, refresh_log)
+
+            def after_write() -> None:
+                set_log_buttons(True)
+                if success:
+                    status_label.configure(text="Entry written.", foreground="green")
+                    entry_text.delete("1.0", END)
+                    refresh_log()
+
+                    # If AI reflection is enabled, fire it off in the background
+                    if ai_reflect_var.get():
+                        run_ai_reflection_async(text)
+                else:
+                    err = stderr or stdout or "Unknown error"
+                    status_label.configure(text=err, foreground="red")
+
+            root.after(0, after_write)
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def run_ai_reflection_async(entry_text: str) -> None:
+        """Optionally ask the model to reflect on a journal entry and store it."""
+        def worker() -> None:
+            # 1) Ask the model for a short reflection
+            prompt = (
+                "You are my journaling assistant. "
+                "I just wrote this entry in my personal Captain's Log:\n\n"
+                f"{entry_text}\n\n"
+                "Reply with ONE or TWO short sentences of helpful reflection or advice."
+            )
+            chat_cmd = [
+                sys.executable,
+                "primus_cli.py",
+                "chat",
+                prompt,
+                "--session",
+                "journal_assistant",
+            ]
+            ok1, out1, err1 = run_cli_command(chat_cmd)
+
+            if not ok1 or not out1:
+                # Don't fail loudly; just note it in the status label on the UI thread
+                def notify_fail() -> None:
+                    status_label.configure(
+                        text="Entry saved, but AI reflection failed; see console.",
+                        foreground="red",
+                    )
+                root.after(0, notify_fail)
+                return
+
+            reflection = out1.strip()
+            if not reflection:
+                return
+
+            # 2) Save the reflection back into Captain's Log as a new entry
+            log_cmd = [
+                sys.executable,
+                "primus_cli.py",
+                "cl",
+                "write",
+                f"AI reflection: {reflection}",
+            ]
+            run_cli_command(log_cmd)
+
+            # 3) Nudge the UI (optional but nice)
+            def notify_ok() -> None:
+                status_label.configure(
+                    text="Entry + AI reflection written.",
+                    foreground="green",
+                )
+                refresh_log()
+            root.after(0, notify_ok)
+
+        threading.Thread(target=worker, daemon=True).start()
+    
     def clear_log() -> None:
         if not messagebox.askyesno("Confirm", "Clear all Captain's Log entries?"):
             return
