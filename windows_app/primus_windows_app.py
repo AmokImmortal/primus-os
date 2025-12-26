@@ -94,6 +94,31 @@ def run_cli_command(cmd: list[str]) -> tuple[bool, str, str]:
     stderr = (proc.stderr or "").strip()
     return proc.returncode == 0, stdout, stderr
 
+def extract_planner_summary(stdout: str, max_chars: int = 1000) -> str:
+    """
+    Take the tail of the planner output and strip off noisy loader lines.
+
+    The actual natural-language plan is usually at the end of stdout,
+    so we keep only the last max_chars and drop obvious llama loader lines.
+    """
+    if not stdout:
+        return ""
+
+    tail = stdout[-max_chars:]
+    lines = []
+    for line in tail.splitlines():
+        if line.startswith("llama_model_loader:"):
+            continue
+        if "PrimusRuntime initialized." in line:
+            continue
+        if "Creating PrimusCore instance from PrimusRuntime" in line:
+            continue
+        if "[core.agent_manager]" in line:
+            continue
+        lines.append(line)
+
+    summary = "\n".join(lines).strip()
+    return summary
 
 def main() -> None:
     root = Tk()
