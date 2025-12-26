@@ -332,7 +332,7 @@ def main() -> None:
     for col in range(2):
         planner_frame.columnconfigure(col, weight=1)
     planner_frame.rowconfigure(1, weight=1)
-    planner_frame.rowconfigure(3, weight=1)
+    planner_frame.rowconfigure(4, weight=1)
 
     ttk.Label(planner_frame, text="Planner prompt:").grid(row=0, column=0, columnspan=2, sticky="w")
     planner_prompt = Text(planner_frame, height=4, width=80)
@@ -344,7 +344,7 @@ def main() -> None:
     planner_status = ttk.Label(planner_frame, text="", foreground="gray")
     planner_status.grid(row=2, column=1, sticky="e")
 
-    # Checkbox: save planner result to Captain's Log (UI only for now)
+    # Checkbox: save planner result to Captain's Log
     save_to_log_var = BooleanVar(value=True)
     save_to_log_check = ttk.Checkbutton(
         planner_frame,
@@ -371,48 +371,39 @@ def main() -> None:
     def handle_planner_result(success: bool, stdout: str, stderr: str) -> None:
         set_planner_button(True)
 
-        # Combine stdout + stderr so we see whatever the subchat printed.
-        combined = stdout or ""
-        if stderr:
-            combined = (combined + "\n" + stderr).strip() if combined else stderr
-
-        if success:
-            # Try to strip loader noise and keep just the actual plan.
-            summary = extract_planner_summary(combined)
-            if not summary:
-                summary = combined
-
-            update_planner_output(summary)
+        if success and not stderr:
+            debug_log(f"Planner stdout (first 200 chars): {stdout[:200]!r}")
+            update_planner_output(stdout)
             planner_status.configure(text="Planner finished.", foreground="green")
 
             # Optionally save to Captain's Log
-            if save_to_log_var.get() and summary:
-                def log_worker() -> None:
-                    cmd = [
-                        sys.executable,
-                        "primus_cli.py",
-                        "cl",
-                        "write",
-                        summary,
-                    ]
-                    ok, _out, _err = run_cli_command(cmd)
+            if save_to_log_var.get():
+                text_to_log = extract_planner_summary(stdout)
+                if text_to_log:
+                    def log_worker() -> None:
+                        log_cmd = [
+                            sys.executable,
+                            "primus_cli.py",
+                            "cl",
+                            "write",
+                            text_to_log,
+                        ]
+                        ok, _out, _err = run_cli_command(log_cmd)
+                        debug_log(f"Planner log write ok={ok}")
+                        def after_log() -> None:
+                            if not ok:
+                                planner_status.configure(
+                                    text="Planner finished, but Captain's Log write failed; see console.",
+                                    foreground="red",
+                                )
+                        root.after(0, after_log)
 
-                    def after_log_write() -> None:
-                        if not ok:
-                            planner_status.configure(
-                                text="Planner finished, but Captain's Log write failed; see console.",
-                                foreground="red",
-                            )
-
-                    root.after(0, after_log_write)
-
-                threading.Thread(target=log_worker, daemon=True).start()
+                    threading.Thread(target=log_worker, daemon=True).start()
         else:
-            # Error path: show whatever we have so you can debug
-            err = stderr or stdout or "Planner: CLI error or SubChat not available; see console."
+            err = stderr or stdout or "Planner: CLI error; see console."
             planner_status.configure(text=err, foreground="red")
-            update_planner_output(err)
-            
+            debug_log(f"Planner error: success={success}, stderr={stderr!r}, stdout={stdout[:200]!r}")
+
     def run_planner() -> None:
         prompt_text = planner_prompt.get("1.0", END).strip()
         if not prompt_text:
@@ -422,18 +413,24 @@ def main() -> None:
         set_planner_button(False)
         planner_status.configure(text="Running planner...", foreground="gray")
 
-    def worker() -> None:
-        planner_prompt_text = build_planner_prompt(prompt_text)
-        cmd = [
-            sys.executable,
-            "primus_cli.py",
-            "chat",
-            planner_prompt_text,
-            "--session",
-            "daily_planner",
-        ]
-        success, stdout, stderr = run_cli_command(cmd)
-        root.after(0, handle_planner_result, success, stdout, stderr)
+        def worker() -> None:
+            try:
+                planner_prompt_text = build_planner_prompt(prompt_text)
+                cmd = [
+                    sys.executable,
+                    "primus_cli.py",
+                    "chat",
+                    planner_prompt_text,
+                    "--session",
+                    "daily_planner",
+                ]
+                debug_log(f"Planner cmd: {cmd!r}")
+                success, stdout, stderr = run_cli_command(cmd)
+            except Exception as exc:
+                success, stdout, stderr = False, "", f"Planner internal error: {exc}"
+                debug_log("Planner worker exception:\n" + traceback.format_exc())
+
+            root.after(0, handle_planner_result, success, stdout, stderr)
 
         threading.Thread(target=worker, daemon=True).start()
 
