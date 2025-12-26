@@ -34,15 +34,28 @@ def build_planner_prompt(user_prompt: str) -> str:
 
 
 def extract_planner_summary(raw: str) -> str:
-    """Strip llama/loader spam and leave just the actual plan text."""
+    """Strip backend/log spam and keep only the actual plan text."""
     if not raw:
         return ""
 
-    lines = []
+    content_lines: list[str] = []
+
     for ln in raw.splitlines():
         stripped = ln.strip()
+        if not stripped:
+            continue
 
-        # Skip obvious backend / loader noise
+        # 1) Drop obvious timestamped log lines
+        #    e.g. "2025-12-25 22:55:54,861 [INFO] ..."
+        if (
+            len(stripped) > 20
+            and stripped[0:4].isdigit()
+            and stripped[4] == "-"
+            and "[INFO]" in stripped
+        ):
+            continue
+
+        # 2) Drop llama/loader/internal noise
         if (
             stripped.startswith("llama_model_loader:")
             or stripped.startswith("print_info:")
@@ -55,18 +68,28 @@ def extract_planner_summary(raw: str) -> str:
             or stripped.startswith("Available chat formats")
             or stripped.startswith("Using gguf chat template")
             or stripped.startswith("Using chat ")
-            or "PrimusRuntime initialized." in stripped
-            or "PrimusCore instance created and initialized." in stripped
         ):
             continue
 
-        lines.append(ln)
+        # 3) Prefer “human” planner lines (checkboxes / bullets / headings)
+        if (
+            stripped.startswith("- [")
+            or stripped.startswith("* ")
+            or stripped.startswith("**")
+        ):
+            content_lines.append(ln)
+            continue
 
-    cleaned = "\n".join(lines).strip()
+        # 4) Otherwise, keep the line only if we already started the plan
+        #    (so we don't accidentally capture early logs).
+        if content_lines:
+            content_lines.append(ln)
+
+    cleaned = "\n".join(content_lines).strip()
     if cleaned:
         return cleaned
 
-    # Fallback: last non-empty paragraph
+    # Fallback: last non-empty paragraph if our filters were too strict
     parts = [p.strip() for p in raw.split("\n\n") if p.strip()]
     return parts[-1] if parts else raw.strip()
     
