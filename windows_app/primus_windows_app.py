@@ -7,17 +7,21 @@ import traceback
 from pathlib import Path
 from tkinter import BooleanVar, END, DISABLED, NORMAL, Tk, ttk, messagebox, Text
 from tkinter.scrolledtext import ScrolledText
-import traceback
 
-
+# Root of the project (C:\P.R.I.M.U.S OS\System)
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+# Single log file for Tk errors / debug
+LOG_PATH = PROJECT_ROOT / "tk_errors.log"
+
 
 def debug_log(msg: str) -> None:
     """Minimal debug logger for the Tk app."""
     try:
-        with open(PROJECT_ROOT / "tk_debug.log", "a", encoding="utf-8") as f:
+        with LOG_PATH.open("a", encoding="utf-8") as f:
             f.write(msg + "\n")
     except Exception:
+        # Never crash the UI because of logging
         pass
 
 
@@ -31,6 +35,7 @@ def build_planner_prompt(user_prompt: str) -> str:
         "Return ONLY the plan."
     )
     return base
+
 
 def extract_planner_summary(raw: str) -> str:
     """Strip backend/log spam and keep only the actual plan text."""
