@@ -318,7 +318,16 @@ def main() -> None:
 
     status_label = ttk.Label(log_frame, text="", foreground="gray")
     status_label.grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
-
+    
+    # Toggle: whether to have AI reflect on new entries
+    ai_reflect_var = BooleanVar(value=False)
+    ai_reflect_check = ttk.Checkbutton(
+        log_frame,
+        text="Ask AI to respond to new entries",
+        variable=ai_reflect_var,
+    )
+    ai_reflect_check.grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+    
     def set_log_buttons(enabled: bool) -> None:
         state = ["!disabled"] if enabled else ["disabled"]
         for btn in (write_btn, refresh_btn, clear_log_btn):
