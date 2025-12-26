@@ -14,6 +14,17 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 import traceback
 
+def build_planner_prompt(user_prompt: str) -> str:
+    base = (
+        "You are my personal daily planner.\n"
+        "Using bullet points with checkboxes in the form '- [ ] task', "
+        "create a realistic, time-blocked plan for my day.\n"
+        "Focus on priorities, breaks, and do NOT add extra chit-chat.\n\n"
+        f"User request: {user_prompt.strip()}\n\n"
+        "Return ONLY the plan."
+    )
+    return base
+
 def _thread_excepthook(args: threading.ExceptHookArgs) -> None:
     log_path = PROJECT_ROOT / "tk_errors.log"
     try:
@@ -94,15 +105,10 @@ def run_cli_command(cmd: list[str]) -> tuple[bool, str, str]:
     stderr = (proc.stderr or "").strip()
     return proc.returncode == 0, stdout, stderr
 
-def extract_planner_summary(stdout: str, max_chars: int = 1000) -> str:
-    """
-    Take the tail of the planner output and strip off noisy loader lines.
-
-    The actual natural-language plan is usually at the end of stdout/stderr,
-    so we keep only the last max_chars and drop obvious llama loader lines.
-    """
-    if not stdout:
-        return ""
+def extract_planner_summary(raw: str) -> str:
+    # For now, just return the stripped raw output.
+    # We can get fancy later if needed.
+    return (raw or "").strip()
 
     tail = stdout[-max_chars:]
     lines = []
@@ -424,18 +430,18 @@ def main() -> None:
         set_planner_button(False)
         planner_status.configure(text="Running planner...", foreground="gray")
 
-        def worker() -> None:
-            cmd = [
-                sys.executable,
-                "primus_cli.py",
-                "subchat",
-                "run",
-                "--id",
-                "daily_planner",
-                prompt_text,
-            ]
-            success, stdout, stderr = run_cli_command(cmd)
-            root.after(0, handle_planner_result, success, stdout, stderr)
+    def worker() -> None:
+        planner_prompt_text = build_planner_prompt(prompt_text)
+        cmd = [
+            sys.executable,
+            "primus_cli.py",
+            "chat",
+            planner_prompt_text,
+            "--session",
+            "daily_planner",
+        ]
+        success, stdout, stderr = run_cli_command(cmd)
+        root.after(0, handle_planner_result, success, stdout, stderr)
 
         threading.Thread(target=worker, daemon=True).start()
 
