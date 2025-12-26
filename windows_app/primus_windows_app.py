@@ -393,6 +393,7 @@ def main() -> None:
         else:
             err = stderr or stdout or "Planner: CLI error or SubChat not available; see console."
             planner_status.configure(text=err, foreground="red")
+            
     def run_planner() -> None:
         prompt_text = planner_prompt.get("1.0", END).strip()
         if not prompt_text:
