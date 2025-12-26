@@ -12,19 +12,32 @@ import traceback
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-import traceback
+def debug_log(msg: str) -> None:
+    """Minimal debug logger for the Tk app."""
+    try:
+        with open(PROJECT_ROOT / "tk_debug.log", "a", encoding="utf-8") as f:
+            f.write(msg + "\n")
+    except Exception:
+        pass
+
 
 def build_planner_prompt(user_prompt: str) -> str:
     base = (
         "You are my personal daily planner.\n"
         "Using bullet points with checkboxes in the form '- [ ] task', "
         "create a realistic, time-blocked plan for my day.\n"
-        "Focus on priorities, breaks, and do NOT add extra chit-chat.\n\n"
+        "Focus on priorities and breaks, and do NOT add extra chit-chat.\n\n"
         f"User request: {user_prompt.strip()}\n\n"
         "Return ONLY the plan."
     )
     return base
 
+
+def extract_planner_summary(raw: str) -> str:
+    # For now, just return the raw plan text.
+    # We can get fancy later if needed.
+    return (raw or "").strip()
+    
 def _thread_excepthook(args: threading.ExceptHookArgs) -> None:
     log_path = PROJECT_ROOT / "tk_errors.log"
     try:
@@ -104,27 +117,6 @@ def run_cli_command(cmd: list[str]) -> tuple[bool, str, str]:
     stdout = (proc.stdout or "").strip()
     stderr = (proc.stderr or "").strip()
     return proc.returncode == 0, stdout, stderr
-
-def extract_planner_summary(raw: str) -> str:
-    # For now, just return the stripped raw output.
-    # We can get fancy later if needed.
-    return (raw or "").strip()
-
-    tail = stdout[-max_chars:]
-    lines = []
-    for line in tail.splitlines():
-        if line.startswith("llama_model_loader:"):
-            continue
-        if "PrimusRuntime initialized." in line:
-            continue
-        if "Creating PrimusCore instance from PrimusRuntime" in line:
-            continue
-        if "[core.agent_manager]" in line:
-            continue
-        lines.append(line)
-
-    summary = "\n".join(lines).strip()
-    return summary
 
 def main() -> None:
     root = Tk()
