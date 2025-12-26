@@ -38,15 +38,14 @@ def extract_planner_summary(raw: str) -> str:
     if not raw:
         return ""
 
-    content_lines: list[str] = []
-
+    # First, filter out obvious log / loader noise
+    filtered: list[str] = []
     for ln in raw.splitlines():
         stripped = ln.strip()
         if not stripped:
             continue
 
-        # 1) Drop obvious timestamped log lines
-        #    e.g. "2025-12-25 22:55:54,861 [INFO] ..."
+        # Timestamped log lines, e.g. "2025-12-25 22:55:54,861 [INFO] ..."
         if (
             len(stripped) > 20
             and stripped[0:4].isdigit()
@@ -55,7 +54,7 @@ def extract_planner_summary(raw: str) -> str:
         ):
             continue
 
-        # 2) Drop llama/loader/internal noise
+        # llama / loader / debug noise
         if (
             stripped.startswith("llama_model_loader:")
             or stripped.startswith("print_info:")
@@ -71,34 +70,47 @@ def extract_planner_summary(raw: str) -> str:
         ):
             continue
 
-        # 3) Prefer “human” planner lines (checkboxes / bullets / headings)
-        if (
-            stripped.startswith("- [")
-            or stripped.startswith("* ")
-            or stripped.startswith("**")
-        ):
-            content_lines.append(ln)
+        filtered.append(ln)
+
+    if not filtered:
+        return raw.strip()
+
+    lines = [ln.rstrip("\n") for ln in filtered]
+
+    # Find first/last checkbox lines to cut off any prompt text around them
+    checkbox_indices = [i for i, ln in enumerate(lines) if ln.strip().startswith("- [")]
+    if checkbox_indices:
+        first_idx = checkbox_indices[0]
+        last_idx = checkbox_indices[-1]
+        slice_lines = lines[first_idx : last_idx + 1]
+    else:
+        slice_lines = lines
+
+    cleaned: list[str] = []
+    for ln in slice_lines:
+        s = ln.strip()
+        if not s:
             continue
 
-        # 4) Otherwise, keep the line only if we already started the plan
-        #    (so we don't accidentally capture early logs).
-        if content_lines:
-            content_lines.append(ln)
-    # Drop a garbage-looking final line (e.g. repeated "[ ] 12:00 ..." fragments)
-    while content_lines:
-        last = content_lines[-1].strip()
-        # keep if it's a nice checkbox sentence with at least one space after the dash
-        if last.startswith("- [") and " - " in last and len(last) > 10:
+        # Skip obviously broken lines that are mostly multiple "- [" fragments
+        # with no proper " - " separator text.
+        if s.count("- [") > 1 and " - " not in s:
+            continue
+
+        cleaned.append(s)
+
+    # Trim trailing junk until the last line looks like a real checkbox task
+    while cleaned:
+        last = cleaned[-1]
+        if last.startswith("- [") and " - " in last and len(last) > 12:
             break
-        content_lines.pop()            
+        cleaned.pop()
 
-    cleaned = "\n".join(content_lines).strip()
     if cleaned:
-        return cleaned
+        return "\n".join(cleaned).strip()
 
-    # Fallback: last non-empty paragraph if our filters were too strict
-    parts = [p.strip() for p in raw.split("\n\n") if p.strip()]
-    return parts[-1] if parts else raw.strip()
+    # Fallback if our filters were too strict
+    return raw.strip()
     
 def _thread_excepthook(args: threading.ExceptHookArgs) -> None:
     log_path = PROJECT_ROOT / "tk_errors.log"
@@ -509,11 +521,15 @@ def main() -> None:
     def handle_planner_result(success: bool, stdout: str, stderr: str) -> None:
         set_planner_button(True)
 
-        if success:
+        if success and not stderr:
             debug_log(f"Planner stdout (first 200 chars): {stdout[:200]!r}")
-            # Clean out loader spam before showing / logging
+
+            # Clean out loader / prompt spam before showing / logging
             plan_text = extract_planner_summary(stdout)
-            update_planner_output(plan_text or stdout)
+            if not plan_text:
+                plan_text = stdout.strip()
+
+            update_planner_output(plan_text)
             planner_status.configure(text="Planner finished.", foreground="green")
 
             # Optionally save to Captain's Log
@@ -542,7 +558,9 @@ def main() -> None:
         else:
             err = stderr or stdout or "Planner: CLI error; see console."
             planner_status.configure(text=err, foreground="red")
-            debug_log(f"Planner error: success={success}, stderr={stderr!r}, stdout={stdout[:200]!r}")
+            debug_log(
+                f"Planner error: success={success}, stderr={stderr!r}, stdout={stdout[:200]!r}"
+            )
 
     def run_planner() -> None:
         prompt_text = planner_prompt.get("1.0", END).strip()
