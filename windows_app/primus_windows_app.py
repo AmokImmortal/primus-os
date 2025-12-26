@@ -7,6 +7,7 @@ import traceback
 from pathlib import Path
 from tkinter import BooleanVar, END, DISABLED, NORMAL, Tk, ttk, messagebox, Text
 from tkinter.scrolledtext import ScrolledText
+import traceback
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -35,6 +36,21 @@ def log_thread_exception(context: str) -> None:
     own callback error handler.
     """
     log_path = PROJECT_ROOT / "tk_errors.log"
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(f"\n=== {context} ===\n")
+            traceback.print_exc(file=f)
+    except Exception:
+        # Never let logging itself kill the app
+        pass
+
+def log_thread_exception(context: str) -> None:
+    """
+    Log exceptions from background threads (planner, log write, etc.)
+    into planner_errors.log so we can debug crashes that don't hit Tk's
+    own callback error handler.
+    """
+    log_path = PROJECT_ROOT / "planner_errors.log"
     try:
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"\n=== {context} ===\n")
