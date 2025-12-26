@@ -34,9 +34,41 @@ def build_planner_prompt(user_prompt: str) -> str:
 
 
 def extract_planner_summary(raw: str) -> str:
-    # For now, just return the raw plan text.
-    # We can get fancy later if needed.
-    return (raw or "").strip()
+    """Strip llama/loader spam and leave just the actual plan text."""
+    if not raw:
+        return ""
+
+    lines = []
+    for ln in raw.splitlines():
+        stripped = ln.strip()
+
+        # Skip obvious backend / loader noise
+        if (
+            stripped.startswith("llama_model_loader:")
+            or stripped.startswith("print_info:")
+            or stripped.startswith("load:")
+            or stripped.startswith("repack:")
+            or stripped.startswith("llama_context:")
+            or stripped.startswith("graph_reserve:")
+            or stripped.startswith("CPU :")
+            or stripped.startswith("Model metadata:")
+            or stripped.startswith("Available chat formats")
+            or stripped.startswith("Using gguf chat template")
+            or stripped.startswith("Using chat ")
+            or "PrimusRuntime initialized." in stripped
+            or "PrimusCore instance created and initialized." in stripped
+        ):
+            continue
+
+        lines.append(ln)
+
+    cleaned = "\n".join(lines).strip()
+    if cleaned:
+        return cleaned
+
+    # Fallback: last non-empty paragraph
+    parts = [p.strip() for p in raw.split("\n\n") if p.strip()]
+    return parts[-1] if parts else raw.strip()
     
 def _thread_excepthook(args: threading.ExceptHookArgs) -> None:
     log_path = PROJECT_ROOT / "tk_errors.log"
@@ -371,34 +403,36 @@ def main() -> None:
     def handle_planner_result(success: bool, stdout: str, stderr: str) -> None:
         set_planner_button(True)
 
-        if success and not stderr:
+        if success:
             debug_log(f"Planner stdout (first 200 chars): {stdout[:200]!r}")
-            update_planner_output(stdout)
+            # Clean out loader spam before showing / logging
+            plan_text = extract_planner_summary(stdout)
+            update_planner_output(plan_text or stdout)
             planner_status.configure(text="Planner finished.", foreground="green")
 
             # Optionally save to Captain's Log
-            if save_to_log_var.get():
-                text_to_log = extract_planner_summary(stdout)
-                if text_to_log:
-                    def log_worker() -> None:
-                        log_cmd = [
-                            sys.executable,
-                            "primus_cli.py",
-                            "cl",
-                            "write",
-                            text_to_log,
-                        ]
-                        ok, _out, _err = run_cli_command(log_cmd)
-                        debug_log(f"Planner log write ok={ok}")
-                        def after_log() -> None:
-                            if not ok:
-                                planner_status.configure(
-                                    text="Planner finished, but Captain's Log write failed; see console.",
-                                    foreground="red",
-                                )
-                        root.after(0, after_log)
+            if save_to_log_var.get() and plan_text:
+                def log_worker() -> None:
+                    cmd = [
+                        sys.executable,
+                        "primus_cli.py",
+                        "cl",
+                        "write",
+                        plan_text,
+                    ]
+                    ok, _out, _err = run_cli_command(cmd)
+                    debug_log(f"Planner log write ok={ok}")
 
-                    threading.Thread(target=log_worker, daemon=True).start()
+                    def after_log() -> None:
+                        if not ok:
+                            planner_status.configure(
+                                text="Planner finished, but Captain's Log write failed; see console.",
+                                foreground="red",
+                            )
+
+                    root.after(0, after_log)
+
+                threading.Thread(target=log_worker, daemon=True).start()
         else:
             err = stderr or stdout or "Planner: CLI error; see console."
             planner_status.configure(text=err, foreground="red")
