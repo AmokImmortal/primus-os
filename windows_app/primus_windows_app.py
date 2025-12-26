@@ -84,6 +84,13 @@ def extract_planner_summary(raw: str) -> str:
         #    (so we don't accidentally capture early logs).
         if content_lines:
             content_lines.append(ln)
+    # Drop a garbage-looking final line (e.g. repeated "[ ] 12:00 ..." fragments)
+    while content_lines:
+        last = content_lines[-1].strip()
+        # keep if it's a nice checkbox sentence with at least one space after the dash
+        if last.startswith("- [") and " - " in last and len(last) > 10:
+            break
+        content_lines.pop()            
 
     cleaned = "\n".join(content_lines).strip()
     if cleaned:
