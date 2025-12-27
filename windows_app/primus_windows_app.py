@@ -259,6 +259,14 @@ def main() -> None:
     refresh_btn.grid(row=1, column=0, pady=(0, 4), sticky="ew")
     clear_log_btn.grid(row=2, column=0, sticky="ew")
 
+    log_ai_var = BooleanVar(value=False)
+    log_ai_check = ttk.Checkbutton(
+        log_frame,
+        text="Use AI assistant for new entries",
+        variable=log_ai_var,
+    )
+    log_ai_check.grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
     status_label = ttk.Label(log_frame, text="", foreground="gray")
     status_label.grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
@@ -314,13 +322,69 @@ def main() -> None:
         set_log_buttons(False)
 
         def worker() -> None:
+            if not log_ai_var.get():
+                try:
+                    cmd = [sys.executable, "primus_cli.py", "cl", "write", text]
+                    success, stdout, stderr = run_cli_command(cmd)
+                    root.after(0, handle_log_result, success, stdout, stderr, "Entry written.")
+                    if success:
+                        root.after(0, lambda: entry_text.delete("1.0", END))
+                        root.after(0, refresh_log)
+                except Exception:
+                    tb = traceback.format_exc()
+                    debug_log(tb)
+                    root.after(
+                        0,
+                        handle_log_result,
+                        False,
+                        "",
+                        "Captain's Log write crashed; see tk_debug.log",
+                        "",
+                    )
+                return
+
+            # AI-assisted path
             try:
-                cmd = [sys.executable, "primus_cli.py", "cl", "write", text]
-                success, stdout, stderr = run_cli_command(cmd)
-                root.after(0, handle_log_result, success, stdout, stderr, "Entry written.")
-                if success:
-                    root.after(0, lambda: entry_text.delete("1.0", END))
-                    root.after(0, refresh_log)
+                chat_cmd = [
+                    sys.executable,
+                    "primus_cli.py",
+                    "chat",
+                    text,
+                    "--session",
+                    "captains_log_ai",
+                ]
+                chat_ok, chat_out, chat_err = run_cli_command(chat_cmd)
+                if not chat_ok:
+                    debug_log(f"Captain's Log AI chat failed: err={chat_err!r}, out={chat_out!r}")
+                    root.after(
+                        0,
+                        handle_log_result,
+                        False,
+                        chat_out,
+                        chat_err or "AI assistant failed; see console.",
+                        "",
+                    )
+                    return
+
+                combined = f"User: {text}\nAssistant: {chat_out.strip()}"
+                write_cmd = [sys.executable, "primus_cli.py", "cl", "write", combined]
+                write_ok, write_out, write_err = run_cli_command(write_cmd)
+                debug_log(f"Captain's Log AI write ok={write_ok}, err={write_err!r}")
+
+                def after_ai_write() -> None:
+                    if write_ok:
+                        handle_log_result(True, write_out, write_err, "Entry written with AI assistant.")
+                        entry_text.delete("1.0", END)
+                        refresh_log()
+                    else:
+                        handle_log_result(
+                            False,
+                            write_out,
+                            write_err or "Captain's Log write failed; see console.",
+                            "",
+                        )
+
+                root.after(0, after_ai_write)
             except Exception:
                 tb = traceback.format_exc()
                 debug_log(tb)
@@ -329,7 +393,7 @@ def main() -> None:
                     handle_log_result,
                     False,
                     "",
-                    "Captain's Log write crashed; see tk_debug.log",
+                    "Captain's Log AI write crashed; see tk_debug.log",
                     "",
                 )
 
