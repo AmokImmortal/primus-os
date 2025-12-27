@@ -577,9 +577,9 @@ def main() -> None:
         planner_status.configure(text="Running planner...", foreground="gray")
         update_planner_output("")
 
-        prompt_for_backend = build_planner_prompt(user_prompt)
-
         def worker() -> None:
+            # IMPORTANT: send the raw user prompt again,
+            # not build_planner_prompt(...)
             cmd = [
                 sys.executable,
                 "primus_cli.py",
@@ -587,7 +587,7 @@ def main() -> None:
                 "run",
                 "--id",
                 "daily_planner",
-                prompt_for_backend,
+                user_prompt,
             ]
             success, stdout, stderr = run_cli_command(cmd)
             debug_log(
@@ -597,8 +597,6 @@ def main() -> None:
             root.after(0, handle_planner_result, success, stdout, stderr)
 
         threading.Thread(target=worker, daemon=True).start()
-
-    run_planner_btn.configure(command=run_planner)
 
     refresh_log()
     root.mainloop()
