@@ -418,7 +418,8 @@ def main() -> None:
 
         debug_log(f"Planner stdout (first 200 chars): {stdout[:200]!r}")
         plan_text = extract_planner_summary(stdout)
-        update_planner_output(plan_text or stdout)
+        display_text = plan_text or (stdout.strip() if stdout.strip() else "[no output from planner]")
+        update_planner_output(display_text)
         planner_status.configure(text="Planner finished.", foreground="green")
 
         if save_plan_var.get() and plan_text:
@@ -432,7 +433,7 @@ def main() -> None:
                         plan_text,
                     ]
                     ok, _out, _err = run_cli_command(cmd)
-                    debug_log(f"Planner log write ok={ok}")
+                    debug_log(f"Planner log write ok={ok}, err={_err!r}")
 
                     def after_log() -> None:
                         if not ok:
@@ -472,25 +473,19 @@ def main() -> None:
                 cmd = [
                     sys.executable,
                     "primus_cli.py",
-                    "chat",
-                    full_prompt,
-                    "--session",
+                    "subchat",
+                    "run",
+                    "--id",
                     "daily_planner",
+                    full_prompt,
                 ]
                 success, stdout, stderr = run_cli_command(cmd)
-                root.after(0, handle_planner_result, success, stdout, stderr)
-            except Exception:
-                tb = traceback.format_exc()
-                debug_log(tb)
+            except Exception as e:
+                debug_log(f"Planner worker exception: {e!r}")
+                debug_log(traceback.format_exc())
+                success, stdout, stderr = False, "", str(e)
 
-                def _fail() -> None:
-                    set_planner_button(True)
-                    planner_status.configure(
-                        text="Planner crashed; see tk_debug.log",
-                        foreground="red",
-                    )
-
-                root.after(0, _fail)
+            root.after(0, handle_planner_result, success, stdout, stderr)
 
         threading.Thread(target=worker, daemon=True).start()
 
