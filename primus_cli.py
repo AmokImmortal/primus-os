@@ -249,6 +249,28 @@ def cli_subchat_run(args: argparse.Namespace) -> None:
     runtime = PrimusRuntime()
     core = runtime._ensure_core()  # type: ignore[attr-defined]
 
+    # Special-case daily_planner to ensure clean, checklist-style output without subchat fallback noise.
+    if args.id == "daily_planner":
+        try:
+            config_path = Path(__file__).resolve().parent / "subchats" / "daily_planner.json"
+            system_prompt = ""
+            if config_path.exists():
+                data = json.loads(config_path.read_text(encoding="utf-8"))
+                system_prompt = data.get("system_prompt", "")
+            user_prompt = args.message.strip()
+            prompt_parts = [p for p in (system_prompt.strip(), f"User request: {user_prompt}", "Return ONLY the plan.") if p]
+            full_prompt = "\n\n".join(prompt_parts)
+            reply = core.chat(
+                user_message=full_prompt,
+                session_id=args.session or "daily_planner",
+                use_rag=False,
+                rag_index="docs",
+            )
+            print((reply or "").strip())
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Daily planner fast-path failed, falling back to subchat manager: %s", exc)
+
     run_fn = getattr(core, "run_subchat", None)
     if not callable(run_fn):
         print("SubChat system is not available.")
