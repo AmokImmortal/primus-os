@@ -320,6 +320,10 @@ def main() -> None:
 
     def refresh_log() -> None:
         set_log_buttons(False)
+        if log_ai_var.get():
+            status_label.configure(text="Running AI assistant...", foreground="gray")
+        else:
+            status_label.configure(text="", foreground="gray")
 
         def worker() -> None:
             try:
