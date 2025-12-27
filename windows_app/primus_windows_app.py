@@ -343,7 +343,7 @@ def main() -> None:
     def write_log_entry() -> None:
         text = entry_text.get("1.0", END).strip()
         if not text:
-            status_label.configure(text="Please enter text to write.", foreground="red")
+            messagebox.showinfo("Captain's Log", "Please enter some text before writing to the log.")
             return
 
         set_log_buttons(False)
