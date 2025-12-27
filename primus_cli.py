@@ -249,6 +249,46 @@ def cli_subchat_run(args: argparse.Namespace) -> None:
     runtime = PrimusRuntime()
     core = runtime._ensure_core()  # type: ignore[attr-defined]
 
+    def _clean_daily_planner_output(text: str) -> str:
+        lines = []
+        for ln in text.splitlines():
+            s = ln.strip()
+            if not s:
+                continue
+            if s.startswith("[Subchat:"):
+                continue
+            if s.startswith("User:") or s.startswith("Assistant:"):
+                continue
+            lines.append(ln.rstrip("\n"))
+        return "\n".join(lines).strip() if lines else text.strip()
+
+    # Special-case daily_planner to ensure clean, checklist-style output without subchat fallback noise.
+    if args.id == "daily_planner":
+        try:
+            config_path = Path(__file__).resolve().parent / "subchats" / "daily_planner.json"
+            system_prompt = ""
+            if config_path.exists():
+                data = json.loads(config_path.read_text(encoding="utf-8"))
+                system_prompt = data.get("system_prompt", "")
+            user_prompt = args.message.strip()
+            prompt_parts = [
+                system_prompt.strip(),
+                "Return the plan as checklist lines starting with '- [ ]', without extra preamble or assistant labels.",
+                f"Request: {user_prompt}",
+            ]
+            prompt_parts = [p for p in prompt_parts if p]
+            full_prompt = "\n\n".join(prompt_parts)
+            reply = core.chat(
+                user_message=full_prompt,
+                session_id=args.session or "daily_planner",
+                use_rag=False,
+                rag_index="docs",
+            )
+            print(_clean_daily_planner_output(reply or ""))
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Daily planner fast-path failed, falling back to subchat manager: %s", exc)
+
     run_fn = getattr(core, "run_subchat", None)
     if not callable(run_fn):
         print("SubChat system is not available.")
@@ -259,7 +299,10 @@ def cli_subchat_run(args: argparse.Namespace) -> None:
         user_message=args.message,
         session_id=args.session,
     )
-    print(reply)
+    if args.id == "daily_planner" and isinstance(reply, str):
+        print(_clean_daily_planner_output(reply))
+    else:
+        print(reply)
 
 
 # --------------------------------------------------------------------------- #

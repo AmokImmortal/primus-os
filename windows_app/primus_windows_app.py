@@ -286,6 +286,14 @@ def main() -> None:
     refresh_btn.grid(row=1, column=0, pady=(0, 4), sticky="ew")
     clear_log_btn.grid(row=2, column=0, sticky="ew")
 
+    log_ai_var = BooleanVar(value=False)
+    log_ai_check = ttk.Checkbutton(
+        log_frame,
+        text="Use AI assistant for new entries",
+        variable=log_ai_var,
+    )
+    log_ai_check.grid(row=4, column=0, columnspan=2, sticky="w", pady=(4, 0))
+
     status_label = ttk.Label(log_frame, text="", foreground="gray")
     status_label.grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
