@@ -75,6 +75,9 @@ def extract_planner_summary(raw: str) -> str:
             or stripped.startswith("Using gguf chat template")
             or stripped.startswith("Using chat ")
             or stripped.startswith("You are my personal daily planner")
+            or stripped.startswith("[Subchat:")
+            or stripped.startswith("User:")
+            or stripped.startswith("Assistant:")
         ):
             continue
 

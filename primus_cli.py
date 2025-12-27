@@ -249,6 +249,19 @@ def cli_subchat_run(args: argparse.Namespace) -> None:
     runtime = PrimusRuntime()
     core = runtime._ensure_core()  # type: ignore[attr-defined]
 
+    def _clean_daily_planner_output(text: str) -> str:
+        lines = []
+        for ln in text.splitlines():
+            s = ln.strip()
+            if not s:
+                continue
+            if s.startswith("[Subchat:"):
+                continue
+            if s.startswith("User:") or s.startswith("Assistant:"):
+                continue
+            lines.append(ln.rstrip("\n"))
+        return "\n".join(lines).strip() if lines else text.strip()
+
     # Special-case daily_planner to ensure clean, checklist-style output without subchat fallback noise.
     if args.id == "daily_planner":
         try:
@@ -271,7 +284,7 @@ def cli_subchat_run(args: argparse.Namespace) -> None:
                 use_rag=False,
                 rag_index="docs",
             )
-            print((reply or "").strip())
+            print(_clean_daily_planner_output(reply or ""))
             return
         except Exception as exc:  # noqa: BLE001
             logger.warning("Daily planner fast-path failed, falling back to subchat manager: %s", exc)
@@ -286,7 +299,10 @@ def cli_subchat_run(args: argparse.Namespace) -> None:
         user_message=args.message,
         session_id=args.session,
     )
-    print(reply)
+    if args.id == "daily_planner" and isinstance(reply, str):
+        print(_clean_daily_planner_output(reply))
+    else:
+        print(reply)
 
 
 # --------------------------------------------------------------------------- #
