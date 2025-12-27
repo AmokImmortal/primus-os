@@ -258,7 +258,12 @@ def cli_subchat_run(args: argparse.Namespace) -> None:
                 data = json.loads(config_path.read_text(encoding="utf-8"))
                 system_prompt = data.get("system_prompt", "")
             user_prompt = args.message.strip()
-            prompt_parts = [p for p in (system_prompt.strip(), f"User request: {user_prompt}", "Return ONLY the plan.") if p]
+            prompt_parts = [
+                system_prompt.strip(),
+                "Return the plan as checklist lines starting with '- [ ]', without extra preamble or assistant labels.",
+                f"Request: {user_prompt}",
+            ]
+            prompt_parts = [p for p in prompt_parts if p]
             full_prompt = "\n\n".join(prompt_parts)
             reply = core.chat(
                 user_message=full_prompt,

@@ -46,6 +46,8 @@ def extract_planner_summary(raw: str) -> str:
     if not raw:
         return ""
 
+    debug_log(f"Planner raw stdout (first 200 chars): {raw[:200]!r}")
+
     filtered: list[str] = []
     for ln in raw.splitlines():
         stripped = ln.strip()
@@ -72,6 +74,7 @@ def extract_planner_summary(raw: str) -> str:
             or stripped.startswith("Available chat formats")
             or stripped.startswith("Using gguf chat template")
             or stripped.startswith("Using chat ")
+            or stripped.startswith("You are my personal daily planner")
         ):
             continue
 
