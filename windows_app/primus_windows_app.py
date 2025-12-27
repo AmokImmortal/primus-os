@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 import sys
 import threading
+import traceback
 from pathlib import Path
 from tkinter import BooleanVar, END, DISABLED, NORMAL, Tk, ttk, messagebox, Text
 from tkinter.scrolledtext import ScrolledText
@@ -196,15 +197,14 @@ def main() -> None:
     def set_send_enabled(enabled: bool) -> None:
         send_btn.state(["!disabled"] if enabled else ["disabled"])
 
-    def handle_result(success: bool, stdout: str, stderr: str, user_text: str) -> None:
+    def handle_chat_result(success: bool, stdout: str, stderr: str, user_text: str) -> None:
         set_send_enabled(True)
         if success:
             append_chat_line(transcript, f"User: {user_text}")
-            if stdout:
-                reply = stdout if len(stdout) < 4000 else stdout[:4000] + "...[truncated]"
-                append_chat_line(transcript, f"Assistant: {reply}")
-            else:
-                append_chat_line(transcript, "Assistant: [no output]")
+            reply = stdout if stdout else "[no output]"
+            if len(reply) > 4000:
+                reply = reply[:4000] + "...[truncated]"
+            append_chat_line(transcript, f"Assistant: {reply}")
         else:
             err_msg = stderr or "Unknown error."
             append_chat_line(transcript, f"[ERROR] {err_msg}")
@@ -222,9 +222,32 @@ def main() -> None:
         set_send_enabled(False)
 
         def worker() -> None:
-            cmd = build_command(user_text, session_id, use_rag, rag_index)
-            success, stdout, stderr = run_cli_command(cmd)
-            root.after(0, handle_result, success, stdout, stderr, user_text)
+            try:
+                cmd = [
+                    sys.executable,
+                    "primus_cli.py",
+                    "chat",
+                    user_text,
+                    "--session",
+                    session_id,
+                ]
+                if use_rag:
+                    cmd.append("--rag")
+                    if rag_index:
+                        cmd.extend(["--index", rag_index])
+                success, stdout, stderr = run_cli_command(cmd)
+                root.after(0, handle_chat_result, success, stdout, stderr, user_text)
+            except Exception:
+                tb = traceback.format_exc()
+                debug_log(tb)
+                root.after(
+                    0,
+                    handle_chat_result,
+                    False,
+                    "",
+                    "Chat crashed; see tk_debug.log",
+                    user_text,
+                )
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -291,9 +314,21 @@ def main() -> None:
         set_log_buttons(False)
 
         def worker() -> None:
-            cmd = [sys.executable, "primus_cli.py", "cl", "read"]
-            success, stdout, stderr = run_cli_command(cmd)
-            root.after(0, handle_log_result, success, stdout, stderr, "Log refreshed.")
+            try:
+                cmd = [sys.executable, "primus_cli.py", "cl", "read"]
+                success, stdout, stderr = run_cli_command(cmd)
+                root.after(0, handle_log_result, success, stdout, stderr, "Log refreshed.")
+            except Exception:
+                tb = traceback.format_exc()
+                debug_log(tb)
+                root.after(
+                    0,
+                    handle_log_result,
+                    False,
+                    "",
+                    "Captain's Log refresh crashed; see tk_debug.log",
+                    "",
+                )
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -306,12 +341,24 @@ def main() -> None:
         set_log_buttons(False)
 
         def worker() -> None:
-            cmd = [sys.executable, "primus_cli.py", "cl", "write", text]
-            success, stdout, stderr = run_cli_command(cmd)
-            root.after(0, handle_log_result, success, stdout, stderr, "Entry written.")
-            if success:
-                root.after(0, lambda: entry_text.delete("1.0", END))
-                root.after(0, refresh_log)
+            try:
+                cmd = [sys.executable, "primus_cli.py", "cl", "write", text]
+                success, stdout, stderr = run_cli_command(cmd)
+                root.after(0, handle_log_result, success, stdout, stderr, "Entry written.")
+                if success:
+                    root.after(0, lambda: entry_text.delete("1.0", END))
+                    root.after(0, refresh_log)
+            except Exception:
+                tb = traceback.format_exc()
+                debug_log(tb)
+                root.after(
+                    0,
+                    handle_log_result,
+                    False,
+                    "",
+                    "Captain's Log write crashed; see tk_debug.log",
+                    "",
+                )
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -322,11 +369,23 @@ def main() -> None:
         set_log_buttons(False)
 
         def worker() -> None:
-            cmd = [sys.executable, "primus_cli.py", "cl", "clear"]
-            success, stdout, stderr = run_cli_command(cmd)
-            root.after(0, handle_log_result, success, stdout, stderr, "Log cleared.")
-            if success:
-                root.after(0, refresh_log)
+            try:
+                cmd = [sys.executable, "primus_cli.py", "cl", "clear"]
+                success, stdout, stderr = run_cli_command(cmd)
+                root.after(0, handle_log_result, success, stdout, stderr, "Log cleared.")
+                if success:
+                    root.after(0, refresh_log)
+            except Exception:
+                tb = traceback.format_exc()
+                debug_log(tb)
+                root.after(
+                    0,
+                    handle_log_result,
+                    False,
+                    "",
+                    "Captain's Log clear crashed; see tk_debug.log",
+                    "",
+                )
 
         threading.Thread(target=worker, daemon=True).start()
 
