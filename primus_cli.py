@@ -103,6 +103,37 @@ def cli_captains_log(args: argparse.Namespace) -> None:
       - read
       - clear
     """
+
+    def _clean_log_entry_text(raw: str) -> str:
+        lines = []
+        for ln in (raw or "").splitlines():
+            s = ln.strip()
+            if not s:
+                continue
+            if (
+                len(s) > 20
+                and s[:4].isdigit()
+                and s[4] == "-"
+                and "[INFO]" in s
+            ):
+                continue
+            if (
+                s.startswith("llama_model_loader:")
+                or s.startswith("print_info:")
+                or s.startswith("load:")
+                or s.startswith("repack:")
+                or s.startswith("llama_context:")
+                or s.startswith("graph_reserve:")
+                or s.startswith("CPU :")
+                or s.startswith("Model metadata:")
+                or s.startswith("Available chat formats")
+                or s.startswith("Using gguf chat template")
+                or s.startswith("Using chat ")
+            ):
+                continue
+            lines.append(ln.rstrip("\n"))
+        return "\n".join(lines).strip()
+
     runtime = PrimusRuntime()
     core = runtime._ensure_core()  # type: ignore[attr-defined]
     manager = getattr(runtime, "captains_log_manager", None)
@@ -147,7 +178,10 @@ def cli_captains_log(args: argparse.Namespace) -> None:
             print(f"Captain's Log entries (showing up to {len(entries)}):")
             for idx, entry in enumerate(entries, 1):
                 ts = entry.get("ts") or entry.get("timestamp", "")
-                text = (entry.get("text") or "").strip()
+                text = _clean_log_entry_text(entry.get("text") or "")
+                if not text:
+                    print(f"{idx:02d}) {ts} [entry contained only internal logs; hidden]")
+                    continue
                 if len(text) > 200:
                     text = text[:200] + "...[truncated]"
                 print(f"{idx:02d}) {ts} {text}")
